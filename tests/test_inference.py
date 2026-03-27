@@ -6,58 +6,224 @@ Tests that:
 3. predictions_cpu is a non-empty dict containing tensors for 'bus' and 'generator'
 4. Output shapes are correct (2 columns each for bus and generator)
 
-For numerical equivalence testing against lumina-core, set the environment
-variable LUMINA_CORE_REFERENCE=1 and ensure lumina-core is installed.
+All Hugging Face Hub downloads, dataset downloads, and other external
+network calls are mocked using pytest / unittest.mock so that tests
+run entirely offline.
 """
 
 import json
 import os
+from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 import torch
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
+from torch_geometric.data import HeteroData, Batch
 
 from lumina_inference.modeler import Modeler
-from lumina_inference.dataset.opf_dataset import OPFDataset
-from lumina_inference.loader.opf_loader import DataLoader
+
+
+# ---------------------------------------------------------------------------
+# Helpers – fake artifacts
+# ---------------------------------------------------------------------------
+
+NUM_BUSES = 14
+NUM_GENERATORS = 5
+NUM_LOADS = 11
+NUM_SHUNTS = 1
+NUM_AC_LINES = 20
+
+# Bus features: [pd, vmin, vmax, ...] – need at least 3 cols for OPF schema
+BUS_FEATURE_DIM = 4
+# Generator features: [pg, qg, pmin, pmax, qg_status, qmin, qmax] – need ≥7
+GEN_FEATURE_DIM = 7
+LOAD_FEATURE_DIM = 2
+SHUNT_FEATURE_DIM = 2
+AC_LINE_EDGE_ATTR_DIM = 9
+
+
+def _make_fake_config():
+    """Return a realistic config_data dict matching LUMINA-1B structure."""
+    return {
+        "case_name": "pglib_opf_case14_ieee",
+        "metadata": {
+            "nodes": {
+                "bus": BUS_FEATURE_DIM,
+                "generator": GEN_FEATURE_DIM,
+                "load": LOAD_FEATURE_DIM,
+                "shunt": SHUNT_FEATURE_DIM,
+            },
+            "edges": {
+                ("bus", "ac_line", "bus"): AC_LINE_EDGE_ATTR_DIM,
+                ("generator", "generator_link", "bus"): 0,
+                ("bus", "generator_link", "generator"): 0,
+                ("load", "load_link", "bus"): 0,
+                ("bus", "load_link", "load"): 0,
+                ("shunt", "shunt_link", "bus"): 0,
+                ("bus", "shunt_link", "shunt"): 0,
+            },
+        },
+        "input_channels": {
+            "bus": BUS_FEATURE_DIM,
+            "generator": GEN_FEATURE_DIM,
+            "load": LOAD_FEATURE_DIM,
+            "shunt": SHUNT_FEATURE_DIM,
+        },
+        "config": {
+            "models": {
+                "HeteroGNN": {
+                    "hidden_channels": 16,
+                    "num_layers": 2,
+                    "backend": "sage",
+                }
+            }
+        },
+    }
+
+
+def _make_fake_hetero_data():
+    """Build a single HeteroData sample with realistic shapes."""
+    data = HeteroData()
+
+    # Node features --------------------------------------------------------
+    # Bus: vmin/vmax in cols 1,2 so OPF scaling can extract bounds
+    bus_x = torch.randn(NUM_BUSES, BUS_FEATURE_DIM)
+    bus_x[:, 1] = 0.95  # vmin
+    bus_x[:, 2] = 1.05  # vmax
+    data["bus"].x = bus_x
+
+    gen_x = torch.randn(NUM_GENERATORS, GEN_FEATURE_DIM)
+    gen_x[:, 2] = 0.0   # pmin
+    gen_x[:, 3] = 1.0   # pmax
+    gen_x[:, 5] = -0.5  # qmin
+    gen_x[:, 6] = 0.5   # qmax
+    data["generator"].x = gen_x
+
+    data["load"].x = torch.randn(NUM_LOADS, LOAD_FEATURE_DIM)
+    data["shunt"].x = torch.randn(NUM_SHUNTS, SHUNT_FEATURE_DIM)
+
+    # Targets (y) ----------------------------------------------------------
+    data["bus"].y = torch.randn(NUM_BUSES, 2)
+    data["generator"].y = torch.randn(NUM_GENERATORS, 2)
+
+    # Edge indices ---------------------------------------------------------
+    # ac_line edges (bus -> bus)
+    src = torch.randint(0, NUM_BUSES, (NUM_AC_LINES,))
+    dst = torch.randint(0, NUM_BUSES, (NUM_AC_LINES,))
+    data["bus", "ac_line", "bus"].edge_index = torch.stack([src, dst])
+    data["bus", "ac_line", "bus"].edge_attr = torch.randn(
+        NUM_AC_LINES, AC_LINE_EDGE_ATTR_DIM
+    )
+
+    # generator_link edges (generator -> bus)
+    gen_src = torch.arange(NUM_GENERATORS)
+    gen_dst = torch.randint(0, NUM_BUSES, (NUM_GENERATORS,))
+    data["generator", "generator_link", "bus"].edge_index = torch.stack(
+        [gen_src, gen_dst]
+    )
+    data["bus", "generator_link", "generator"].edge_index = torch.stack(
+        [gen_dst, gen_src]
+    )
+
+    # load_link edges (load -> bus)
+    load_src = torch.arange(NUM_LOADS)
+    load_dst = torch.randint(0, NUM_BUSES, (NUM_LOADS,))
+    data["load", "load_link", "bus"].edge_index = torch.stack(
+        [load_src, load_dst]
+    )
+    data["bus", "load_link", "load"].edge_index = torch.stack(
+        [load_dst, load_src]
+    )
+
+    # shunt_link edges (shunt -> bus)
+    shunt_src = torch.arange(NUM_SHUNTS)
+    shunt_dst = torch.randint(0, NUM_BUSES, (NUM_SHUNTS,))
+    data["shunt", "shunt_link", "bus"].edge_index = torch.stack(
+        [shunt_src, shunt_dst]
+    )
+    data["bus", "shunt_link", "shunt"].edge_index = torch.stack(
+        [shunt_dst, shunt_src]
+    )
+
+    return data
+
+
+def _make_fake_batch(batch_size=1):
+    """Create a batched HeteroData from fake samples."""
+    samples = [_make_fake_hetero_data() for _ in range(batch_size)]
+    return Batch.from_data_list(samples)
+
+
+def _build_model_from_config(config_data):
+    """Construct a real (small) OPFHeteroGNN from the fake config."""
+    from lumina_inference.model.hetero_model import OPFHeteroGNN
+
+    return OPFHeteroGNN(
+        metadata=config_data["metadata"],
+        input_channels=config_data["input_channels"],
+        hidden_channels=config_data["config"]["models"]["HeteroGNN"][
+            "hidden_channels"
+        ],
+        num_layers=config_data["config"]["models"]["HeteroGNN"]["num_layers"],
+        backend=config_data["config"]["models"]["HeteroGNN"]["backend"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
-def model_artifacts():
-    """Download and cache model artifacts for the test session."""
-    config_path = hf_hub_download(
-        repo_id="argonne/LUMINA-1B", filename="config.json"
-    )
-    safetensors_path = hf_hub_download(
-        repo_id="argonne/LUMINA-1B", filename="model.safetensors"
-    )
+def fake_config():
+    """Module-scoped fake config_data."""
+    return _make_fake_config()
 
-    with open(config_path, "r") as f:
-        config_data = json.load(f)
 
-    state_dict = load_file(safetensors_path)
-    return config_data, state_dict
+@pytest.fixture(scope="module")
+def fake_state_dict(fake_config):
+    """Module-scoped state dict from a freshly-initialised model."""
+    model = _build_model_from_config(fake_config)
+    return model.state_dict()
+
+
+@pytest.fixture(scope="module")
+def model_artifacts(fake_config, fake_state_dict):
+    """Replaces the old fixture that downloaded from Hugging Face."""
+    return fake_config, fake_state_dict
 
 
 @pytest.fixture(scope="module")
 def modeler_with_model(model_artifacts):
-    """Create a Modeler instance with the model loaded."""
+    """Create a Modeler instance with the model loaded (no network)."""
     config_data, state_dict = model_artifacts
     device = torch.device("cpu")
-    modeler = Modeler(device)
+    modeler = Modeler(device, verbose=False)
     modeler.load_model(config_data, state_dict)
     return modeler, config_data
 
 
 @pytest.fixture(scope="module")
-def dataset_and_loader(model_artifacts):
-    """Load the dataset and create a DataLoader."""
-    config_data, _ = model_artifacts
-    case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
-    dataset = OPFDataset(root="./test_opf_data", case_name=case_name)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False)
+def dataset_and_loader():
+    """Provide a fake dataset and loader without any network access."""
+    fake_samples = [_make_fake_hetero_data() for _ in range(5)]
+
+    # Minimal list-based dataset that quacks like a PyG dataset
+    class _FakeDataset(list):
+        """List wrapper that behaves enough like an InMemoryDataset."""
+        pass
+
+    dataset = _FakeDataset(fake_samples)
+
+    # Use PyG's own DataLoader (imported in the test file under test)
+    from torch_geometric.loader import DataLoader as PyGDataLoader
+
+    loader = PyGDataLoader(dataset, batch_size=1, shuffle=False)
     return dataset, loader
+
+
+# ---------------------------------------------------------------------------
+# Tests – Modeler initialisation
+# ---------------------------------------------------------------------------
 
 
 class TestModelerInit:
@@ -91,6 +257,11 @@ class TestModelerInit:
         assert not hasattr(modeler, "slack_bus_indices")
 
 
+# ---------------------------------------------------------------------------
+# Tests – checkpoint key conversion
+# ---------------------------------------------------------------------------
+
+
 class TestCheckpointKeyConversion:
     """Test checkpoint key conversion logic."""
 
@@ -105,8 +276,13 @@ class TestCheckpointKeyConversion:
         assert result == key
 
 
+# ---------------------------------------------------------------------------
+# Tests – model loading (mocked HF download)
+# ---------------------------------------------------------------------------
+
+
 class TestModelLoading:
-    """Test model loading from Hugging Face artifacts."""
+    """Test model loading from (mocked) Hugging Face artifacts."""
 
     def test_load_model_returns_model_and_config(self, modeler_with_model):
         modeler, config_data = modeler_with_model
@@ -123,9 +299,22 @@ class TestModelLoading:
         modeler, _ = modeler_with_model
         assert isinstance(modeler.model, OPFHeteroGNN)
 
+    def test_hf_hub_download_is_not_called(self, fake_config, fake_state_dict):
+        """Ensure the real hf_hub_download is never invoked."""
+        with patch("huggingface_hub.hf_hub_download") as mock_dl:
+            device = torch.device("cpu")
+            modeler = Modeler(device, verbose=False)
+            modeler.load_model(fake_config, fake_state_dict)
+            mock_dl.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests – prediction (all data is synthetic)
+# ---------------------------------------------------------------------------
+
 
 class TestPrediction:
-    """Test prediction on real data."""
+    """Test prediction on synthetic data (no network calls)."""
 
     def test_predict_batch_returns_dict(
         self, modeler_with_model, dataset_and_loader
@@ -213,6 +402,11 @@ class TestPrediction:
             assert "generator" in predictions_cpu
 
 
+# ---------------------------------------------------------------------------
+# Tests – numerical equivalence (still gated by env-var)
+# ---------------------------------------------------------------------------
+
+
 class TestNumericalEquivalence:
     """Test numerical equivalence against lumina-core reference.
 
@@ -233,7 +427,7 @@ class TestNumericalEquivalence:
 
         # lumina-inference predictions
         device = torch.device("cpu")
-        inf_modeler = Modeler(device)
+        inf_modeler = Modeler(device, verbose=False)
         inf_modeler.load_model(config_data, state_dict)
 
         batch = next(iter(loader))
@@ -259,6 +453,11 @@ class TestNumericalEquivalence:
                 f"and lumina-core. Max diff: "
                 f"{(inf_preds[key] - core_preds[key]).abs().max().item()}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests – no training leakage
+# ---------------------------------------------------------------------------
 
 
 class TestNoTrainingLeakage:
