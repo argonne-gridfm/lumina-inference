@@ -3,7 +3,7 @@
 Vendored from lumina-core evaluator/opf/utils (Modeler class).
 Stripped of all evaluation, constraint checking, and training-checkpoint logic.
 
-Copyright (c) 2025, Argonne National Laboratory
+Copyright (c) 2026, Argonne National Laboratory
 All rights reserved.
 """
 

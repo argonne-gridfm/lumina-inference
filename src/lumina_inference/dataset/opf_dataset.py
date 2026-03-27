@@ -3,7 +3,7 @@
 Vendored from lumina-core dataset/opf/opf_dataset.
 Supports both JSON and HDF5 data formats.
 
-Copyright (c) 2025, Argonne National Laboratory
+Copyright (c) 2026, Argonne National Laboratory
 All rights reserved.
 """
 

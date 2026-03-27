@@ -2,7 +2,7 @@
 
 Vendored from lumina-core dataset/opf/utils — edge index helpers only.
 
-Copyright (c) 2025, Argonne National Laboratory
+Copyright (c) 2026, Argonne National Laboratory
 All rights reserved.
 """
 

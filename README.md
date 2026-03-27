@@ -2,7 +2,7 @@
 
 Lightweight inference package for **LUMINA** trained models. Load models from Hugging Face and run predictions.
 
-![Lumina Inference Pipeline](docs/lumina_inference_pipleline.png)
+![Lumina Inference Pipeline](docs/lumina_inference_workflow.png)
 
 ## 📦 Installation
 
@@ -240,4 +240,4 @@ Data loader with heterogeneous graph batching support.
 
 BSD 3-Clause License. See [LICENSE](LICENSE) for details.
 
-Copyright (c) 2025, UChicago Argonne, LLC. All rights reserved.
+Copyright (c) 2026, UChicago Argonne, LLC. All rights reserved.

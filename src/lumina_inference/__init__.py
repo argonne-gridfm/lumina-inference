@@ -3,7 +3,7 @@ lumina-inference: Lightweight inference package for LUMINA trained models.
 
 Load models from Hugging Face and run predictions without lumina-core.
 
-Copyright (c) 2025, UChicago Argonne, LLC
+Copyright (c) 2026, UChicago Argonne, LLC
 All rights reserved.
 """
 

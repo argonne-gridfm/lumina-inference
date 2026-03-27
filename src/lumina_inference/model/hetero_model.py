@@ -3,7 +3,7 @@
 Vendored from lumina-core model/opf/hetero_model — OPFHeteroGNN only.
 Training-specific model variants (RGAT, HEAT, HGT, etc.) are excluded.
 
-Copyright (c) 2025, Argonne National Laboratory
+Copyright (c) 2026, Argonne National Laboratory
 All rights reserved.
 """
 

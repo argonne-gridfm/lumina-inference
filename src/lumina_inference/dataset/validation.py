@@ -4,7 +4,7 @@ Provides validation utilities to check that HeteroData objects are compatible
 with loaded LUMINA models, and to detect whether data follows the standard
 OPF schema or a generic heterogeneous graph structure.
 
-Copyright (c) 2025, UChicago Argonne, LLC
+Copyright (c) 2026, UChicago Argonne, LLC
 All rights reserved.
 """
 

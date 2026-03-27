@@ -159,5 +159,5 @@ This work was supported by the U.S. Department of Energy, Office of Science, Adv
 
 ## License
 
-Copyright (c) 2025, Argonne National Laboratory
+Copyright (c) 2026, Argonne National Laboratory
 All rights reserved.
