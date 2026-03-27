@@ -1,0 +1,74 @@
+# =============================================================================
+# lumina-inference .gitignore
+# =============================================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# --- Testing ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Data / Model artifacts ---
+data/
+opf_data/
+*.tar.gz
+*.pt
+*.safetensors
+*.ckpt
+*.pth
+model-cache/
+
+# --- HuggingFace cache ---
+.cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- Logs ---
+*.log
+wandb/
+runs/
+
+# --- mypy / type checking ---
+.mypy_cache/
+.dmypy.json
+dmypy.json

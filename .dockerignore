@@ -1,0 +1,54 @@
+# =============================================================================
+# Docker build context exclusions
+# =============================================================================
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing / CI artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data (mounted at runtime, not baked into image)
+data/
+*.tar.gz
+*.pt
+
+# Plans / internal docs (not needed in container)
+plans/
+
+# Docker files (avoid recursive context)
+Dockerfile
+docker-compose.yml
+.dockerignore
