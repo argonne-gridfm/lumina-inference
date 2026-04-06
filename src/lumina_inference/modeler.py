@@ -21,7 +21,10 @@ from lumina_inference.dataset.validation import (
     detect_schema,
     validate_hetero_data,
 )
-from lumina_inference.model.hetero_model import OPFHeteroGNN
+from lumina_inference.model.registry import (
+    build_hetero_model_spec,
+    resolve_hetero_model_type,
+)
 
 
 class Modeler:
@@ -29,6 +32,12 @@ class Modeler:
 
     This class encapsulates model construction from a Hugging Face config,
     weight loading from SafeTensors state dicts, and batch prediction.
+
+    Supports multiple model architectures (``OPFHeteroGNN``, ``RGAT``,
+    ``HEAT``, ``HGT``) via dynamic model type resolution from the
+    checkpoint config. The model type is determined from the ``"model"``
+    or ``"model_class"`` fields in the config data, falling back to
+    ``OPFHeteroGNN`` (``HeteroGNN``) if neither is present.
 
     Args:
         device (torch.device): Device to run model inference on.
@@ -99,6 +108,14 @@ class Modeler:
 
         return re.sub(pattern, replacer, key)
 
+    @staticmethod
+    def _has_uninitialized_params(model: torch.nn.Module) -> bool:
+        """Check if a model has any uninitialized (lazy) parameters."""
+        for param in model.parameters():
+            if isinstance(param, torch.nn.parameter.UninitializedParameter):
+                return True
+        return False
+
     def load_checkpoint_into_model(
         self,
         model: torch.nn.Module,
@@ -112,6 +129,11 @@ class Modeler:
         Remaps checkpoint keys to model keys using
         ``convert_checkpoint_key_to_model_key`` and then calls
         ``load_state_dict`` with ``strict=False``.
+
+        For models with lazy (uninitialized) parameters (e.g. ``HEAT``
+        which uses ``HEATConv`` with ``in_channels=-1``), the checkpoint
+        is loaded directly via ``load_state_dict`` without first
+        inspecting the model's current state dict.
 
         Args:
             model (torch.nn.Module): The model to populate.
@@ -128,23 +150,33 @@ class Modeler:
             ValueError: If ``fail_on_missing`` is True and missing keys
                 are found.
         """
-        model_state = model.state_dict()
-        used_keys = set()
+        if self._has_uninitialized_params(model):
+            # Lazy modules cannot produce a state_dict before a forward
+            # pass.  Use assign=True to replace UninitializedParameter
+            # objects with the checkpoint tensors directly.
+            load_result = model.load_state_dict(
+                checkpoint_dict, strict=False, assign=True
+            )
+            missing_keys = list(load_result.missing_keys)
+            unexpected_keys = list(load_result.unexpected_keys)
+        else:
+            model_state = model.state_dict()
+            used_keys = set()
 
-        remapped_state = {}
-        for model_key in model_state.keys():
-            ck = self.convert_checkpoint_key_to_model_key(model_key)
-            if ck in checkpoint_dict:
-                remapped_state[model_key] = checkpoint_dict[ck]
-                used_keys.add(ck)
+            remapped_state = {}
+            for model_key in model_state.keys():
+                ck = self.convert_checkpoint_key_to_model_key(model_key)
+                if ck in checkpoint_dict:
+                    remapped_state[model_key] = checkpoint_dict[ck]
+                    used_keys.add(ck)
 
-        unexpected_keys = [
-            k for k in checkpoint_dict.keys() if k not in used_keys
-        ]
+            unexpected_keys = [
+                k for k in checkpoint_dict.keys() if k not in used_keys
+            ]
 
-        load_result = model.load_state_dict(remapped_state, strict=False)
-        missing_keys = list(load_result.missing_keys)
-        unexpected_keys.extend(list(load_result.unexpected_keys))
+            load_result = model.load_state_dict(remapped_state, strict=False)
+            missing_keys = list(load_result.missing_keys)
+            unexpected_keys.extend(list(load_result.unexpected_keys))
 
         if verbose and (missing_keys or unexpected_keys):
             print(
@@ -162,11 +194,28 @@ class Modeler:
     # -- model loading --------------------------------------------------------
 
     def load_model(self, config_data: dict, state_dict: dict):
-        """Construct the OPFHeteroGNN model from config and state dict.
+        """Construct a hetero OPF model from config and state dict.
+
+        The model architecture is dynamically resolved from the config
+        data. The ``"model"`` field (e.g. ``"HGT"``) or ``"model_class"``
+        field (e.g. ``"lumina.model.opf.hetero_model.HGT"``) determines
+        which architecture to instantiate. If neither is present, defaults
+        to ``OPFHeteroGNN`` (``HeteroGNN``).
+
+        Supported architectures: ``OPFHeteroGNN``, ``RGAT``, ``HEAT``,
+        ``HGT``.
 
         Args:
             config_data (dict): Parsed JSON configuration describing model
-                metadata and architecture.
+                metadata and architecture. Expected keys:
+
+                - ``"metadata"``: Graph metadata with ``nodes`` and ``edges``.
+                - ``"input_channels"``: Dict of node type → feature count.
+                - ``"config.models"``: Per-architecture hyperparameters.
+                - ``"model"`` (optional): Short model type name.
+                - ``"model_class"`` (optional): Fully-qualified class path.
+                - ``"out_channels"`` (optional): Output channels (default 2).
+
             state_dict (dict): Raw state dictionary as returned by
                 ``safetensors.torch.load_file``.
 
@@ -176,7 +225,8 @@ class Modeler:
 
         Raises:
             ValueError: If ``fail_on_missing`` is True and required keys
-                are missing from the checkpoint.
+                are missing from the checkpoint, or if the model type
+                is not recognized.
         """
         # Convert metadata edge keys from strings to tuples if needed
         if "edges" in config_data.get("metadata", {}):
@@ -187,17 +237,26 @@ class Modeler:
                 edges_dict[key] = value
             config_data["metadata"]["edges"] = edges_dict
 
-        model = OPFHeteroGNN(
+        # Dynamically resolve model type from config
+        model_type = resolve_hetero_model_type(
+            model_type=config_data.get("model"),
+            model_class_path=config_data.get("model_class"),
+            default="HeteroGNN",
+        )
+        model_class, model_kwargs, _, used_fallback = build_hetero_model_spec(
+            model_type=model_type,
             metadata=config_data["metadata"],
             input_channels=config_data["input_channels"],
-            hidden_channels=config_data["config"]["models"]["HeteroGNN"][
-                "hidden_channels"
-            ],
-            num_layers=config_data["config"]["models"]["HeteroGNN"][
-                "num_layers"
-            ],
-            backend=config_data["config"]["models"]["HeteroGNN"]["backend"],
-        ).to(self.device)
+            models_config=config_data.get("config", {}).get("models", {}),
+            out_channels=config_data.get("out_channels", 2),
+        )
+        if used_fallback and self.verbose:
+            print(
+                f"[MODEL LOAD] Config for {model_type} not found; "
+                f"using HeteroGNN config."
+            )
+
+        model = model_class(**model_kwargs).to(self.device)
 
         # state_dict is the raw output of safetensors.load_file; remap keys
         checkpoint_dict = {
