@@ -70,10 +70,11 @@ def _make_fake_config():
         },
         "config": {
             "models": {
-                "HeteroGNN": {
+                "HGT": {
                     "hidden_channels": 16,
                     "num_layers": 2,
-                    "backend": "sage",
+                    "num_heads": 1,
+                    "dropout": 0.0,
                 }
             }
         },
@@ -154,17 +155,17 @@ def _make_fake_batch(batch_size=1):
 
 
 def _build_model_from_config(config_data):
-    """Construct a real (small) OPFHeteroGNN from the fake config."""
-    from lumina_inference.model.hetero_model import OPFHeteroGNN
+    """Construct a real (small) HGT from the fake config."""
+    from lumina_inference.model.hetero_model import HGT
 
-    return OPFHeteroGNN(
+    hgt_cfg = config_data["config"]["models"]["HGT"]
+    return HGT(
         metadata=config_data["metadata"],
         input_channels=config_data["input_channels"],
-        hidden_channels=config_data["config"]["models"]["HeteroGNN"][
-            "hidden_channels"
-        ],
-        num_layers=config_data["config"]["models"]["HeteroGNN"]["num_layers"],
-        backend=config_data["config"]["models"]["HeteroGNN"]["backend"],
+        hidden_channels=hgt_cfg["hidden_channels"],
+        num_layers=hgt_cfg["num_layers"],
+        num_heads=hgt_cfg.get("num_heads", 1),
+        dropout=hgt_cfg.get("dropout", 0.0),
     )
 
 
@@ -293,11 +294,11 @@ class TestModelLoading:
         modeler, _ = modeler_with_model
         assert not modeler.model.training
 
-    def test_model_is_opf_hetero_gnn(self, modeler_with_model):
-        from lumina_inference.model.hetero_model import OPFHeteroGNN
+    def test_model_is_hgt(self, modeler_with_model):
+        from lumina_inference.model.hetero_model import HGT
 
         modeler, _ = modeler_with_model
-        assert isinstance(modeler.model, OPFHeteroGNN)
+        assert isinstance(modeler.model, HGT)
 
     def test_hf_hub_download_is_not_called(self, fake_config, fake_state_dict):
         """Ensure the real hf_hub_download is never invoked."""
@@ -421,7 +422,13 @@ class TestNumericalEquivalence:
     def test_predictions_match_lumina_core(
         self, model_artifacts, dataset_and_loader
     ):
-        """Compare predictions from lumina-inference against lumina-core."""
+        """Compare lumina-inference HGT predictions against lumina-core HGT.
+
+        Instantiates lumina-core's HGT directly (not via CoreModeler, which
+        still targets OPFHeteroGNN / "HeteroGNN" config key) and loads the
+        same state dict into both models to verify the vendored copy is
+        numerically identical.
+        """
         config_data, state_dict = model_artifacts
         _, loader = dataset_and_loader
 
@@ -431,20 +438,30 @@ class TestNumericalEquivalence:
         inf_modeler.load_model(config_data, state_dict)
 
         batch = next(iter(loader))
-        inf_preds, _ = inf_modeler.predict_batch(batch)
+        inf_preds, batch_cpu = inf_modeler.predict_batch(batch)
 
-        # lumina-core predictions
-        from lumina.evaluator.opf.utils import (
-            Modeler as CoreModeler,
+
+        from lumina.model.opf.hetero_model import HGT as CoreHGT
+
+        hgt_cfg = config_data["config"]["models"]["HGT"]
+        core_model = CoreHGT(
+            metadata=config_data["metadata"],
+            input_channels=config_data["input_channels"],
+            hidden_channels=hgt_cfg["hidden_channels"],
+            num_layers=hgt_cfg["num_layers"],
+            num_heads=hgt_cfg.get("num_heads", 1),
+            dropout=hgt_cfg.get("dropout", 0.0),
         )
+        core_model.load_state_dict(state_dict)
+        core_model.eval()
 
-        core_modeler = CoreModeler(device, slack_bus_indices="0")
-        core_modeler.load_model(config_data, state_dict)
+        with torch.no_grad():
+            core_preds = core_model(
+                batch_cpu.x_dict,
+                batch_cpu.edge_index_dict,
+                minmax_scaling=True,
+            )
 
-        batch2 = next(iter(loader))
-        core_preds, _ = core_modeler.predict_batch(batch2)
-
-        # Compare
         for key in ["bus", "generator"]:
             assert torch.allclose(
                 inf_preds[key], core_preds[key], atol=1e-5, rtol=1e-4

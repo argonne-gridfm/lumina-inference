@@ -21,7 +21,20 @@ from lumina_inference.dataset.validation import (
     detect_schema,
     validate_hetero_data,
 )
-from lumina_inference.model.hetero_model import OPFHeteroGNN
+from lumina_inference.model.hetero_model import HGT
+
+
+def _safe_edge_attr_dict(batch):
+    """Return edge_attr_dict if any edges carry attributes, else None.
+
+    HeteroData.edge_attr_dict is a property that raises KeyError when no
+    edge type has an edge_attr tensor, so a plain hasattr check is not
+    sufficient.
+    """
+    try:
+        return batch.edge_attr_dict
+    except KeyError:
+        return None
 
 
 class Modeler:
@@ -162,7 +175,7 @@ class Modeler:
     # -- model loading --------------------------------------------------------
 
     def load_model(self, config_data: dict, state_dict: dict):
-        """Construct the OPFHeteroGNN model from config and state dict.
+        """Construct the HGT model from config and state dict.
 
         Args:
             config_data (dict): Parsed JSON configuration describing model
@@ -187,16 +200,19 @@ class Modeler:
                 edges_dict[key] = value
             config_data["metadata"]["edges"] = edges_dict
 
-        model = OPFHeteroGNN(
+        models_cfg = config_data["config"]["models"]
+        hgt_cfg = models_cfg.get("HGT") or models_cfg.get("HeteroGNN")
+        if hgt_cfg is None:
+            raise KeyError(
+                "config['models'] must contain an 'HGT' or 'HeteroGNN' key"
+            )
+        model = HGT(
             metadata=config_data["metadata"],
             input_channels=config_data["input_channels"],
-            hidden_channels=config_data["config"]["models"]["HeteroGNN"][
-                "hidden_channels"
-            ],
-            num_layers=config_data["config"]["models"]["HeteroGNN"][
-                "num_layers"
-            ],
-            backend=config_data["config"]["models"]["HeteroGNN"]["backend"],
+            hidden_channels=hgt_cfg["hidden_channels"],
+            num_layers=hgt_cfg["num_layers"],
+            num_heads=hgt_cfg.get("num_heads", 1),
+            dropout=hgt_cfg.get("dropout", 0.0),
         ).to(self.device)
 
         # state_dict is the raw output of safetensors.load_file; remap keys
@@ -272,7 +288,7 @@ class Modeler:
         predictions = self.model(
             batch.x_dict,
             batch.edge_index_dict,
-            batch.edge_attr_dict if hasattr(batch, "edge_attr_dict") else None,
+            _safe_edge_attr_dict(batch),
             minmax_scaling=minmax_scaling,
         )
 
