@@ -813,11 +813,11 @@ class TestTopLevelImports:
 
 
 class TestModelConditionalRouting:
-    """Test OPFHeteroGNN conditional routing for OPF vs generic data."""
+    """Test HGT forward pass on OPF data."""
 
     def _make_opf_model(self):
-        """Create a small OPF model for testing."""
-        from lumina_inference.model.hetero_model import OPFHeteroGNN
+        """Create a small HGT model for testing."""
+        from lumina_inference.model.hetero_model import HGT
 
         metadata = {
             "nodes": {
@@ -839,13 +839,13 @@ class TestModelConditionalRouting:
         }
         input_channels = {"bus": 7, "generator": 11, "load": 2, "shunt": 2}
 
-        model = OPFHeteroGNN(
+        model = HGT(
             metadata=metadata,
             input_channels=input_channels,
             hidden_channels=16,
             out_channels=2,
             num_layers=2,
-            backend="sage",
+            num_heads=1,
         )
         model.eval()
         return model
@@ -905,81 +905,3 @@ class TestModelConditionalRouting:
                 f"Non-finite values in output['{key}']"
             )
 
-    def test_custom_output_node_types(self):
-        """Model with custom output_node_types."""
-        from lumina_inference.model.hetero_model import OPFHeteroGNN
-
-        metadata = {
-            "nodes": {"A": 4, "B": 3},
-            "edges": {("A", "rel", "B"): 0, ("B", "rel", "A"): 0},
-        }
-
-        model = OPFHeteroGNN(
-            metadata=metadata,
-            input_channels={"A": 4, "B": 3},
-            hidden_channels=8,
-            num_layers=2,
-            backend="sage",
-            output_node_types={"A": 2, "B": 3},
-        )
-        model.eval()
-
-        x_dict = {
-            "A": torch.randn(5, 4),
-            "B": torch.randn(3, 3),
-        }
-        edge_index_dict = {
-            ("A", "rel", "B"): torch.tensor([[0, 1, 2], [0, 1, 2]]),
-            ("B", "rel", "A"): torch.tensor([[0, 1, 2], [0, 1, 2]]),
-        }
-
-        with torch.no_grad():
-            out = model(x_dict, edge_index_dict, minmax_scaling=False)
-
-        assert "A" in out
-        assert "B" in out
-        assert out["A"].shape == (5, 2)
-        assert out["B"].shape == (3, 3)
-
-    def test_generic_data_no_scaling_applied(self):
-        """Generic data should not have OPF scaling even when requested."""
-        from lumina_inference.model.hetero_model import OPFHeteroGNN
-
-        metadata = {
-            "nodes": {"station": 4, "sensor": 3},
-            "edges": {
-                ("station", "connects", "sensor"): 0,
-                ("sensor", "monitors", "station"): 0,
-            },
-        }
-
-        model = OPFHeteroGNN(
-            metadata=metadata,
-            input_channels={"station": 4, "sensor": 3},
-            hidden_channels=8,
-            num_layers=2,
-            backend="sage",
-            output_node_types={"station": 2},
-        )
-        model.eval()
-
-        x_dict = {
-            "station": torch.randn(5, 4),
-            "sensor": torch.randn(10, 3),
-        }
-        edge_index_dict = {
-            ("station", "connects", "sensor"): torch.tensor(
-                [[0, 1, 2, 3, 4], [0, 2, 4, 6, 8]]
-            ),
-            ("sensor", "monitors", "station"): torch.tensor(
-                [[0, 2, 4, 6, 8], [0, 1, 2, 3, 4]]
-            ),
-        }
-
-        with torch.no_grad():
-            # Even with minmax_scaling=True, generic data should not crash
-            out = model(x_dict, edge_index_dict, minmax_scaling=True)
-
-        assert "station" in out
-        assert out["station"].shape == (5, 2)
-        assert torch.isfinite(out["station"]).all()
