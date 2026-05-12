@@ -45,8 +45,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/argonne/lumina-inference"
-Repository = "https://github.com/argonne/lumina-inference"
+Homepage = "https://github.com/argonne-gridfm/lumina-inference"
+Repository = "https://github.com/argonne-gridfm/lumina-inference"
 
 [tool.setuptools.packages.find]
 where = ["src"]

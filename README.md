@@ -6,14 +6,10 @@ Lightweight inference package for **LUMINA** trained models. Load models from Hu
 
 ## 📦 Installation
 
-```bash
-pip install lumina-inference
-```
-
-Or install from source:
+Install from source:
 
 ```bash
-git clone https://github.com/argonne/lumina-inference.git
+git clone https://github.com/argonne-gridfm/lumina-inference.git
 cd lumina-inference
 pip install -e .
 ```
