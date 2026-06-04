@@ -2,7 +2,22 @@
 
 Lightweight inference package for **LUMINA** trained models. Load models from Hugging Face and run predictions.
 
-![Lumina Inference Pipeline](docs/lumina_inference_workflow.png)
+```mermaid
+flowchart LR
+    A["🔧 Initialize<br/><b>Device + Modeler</b>"] --> B["📦 Load Artifacts<br/>+ Build Model<br/><b>Artifacts → OPFHeteroGNN</b>"]
+    B --> C{"Data Ingestion<br/>Pathway"}
+    C -->|Pathway A| D["📊 Batch Pipeline<br/><b>OPFDataset → DataLoader → Batch</b>"]
+    C -->|Pathway B| E["🎯 Single-Sample Ingestion<br/><b>load_from_* → HeteroData</b>"]
+    D --> F["⚡ Forward Pass<br/>+ Collect Outputs<br/><b>Predictions</b>"]
+    E --> F
+
+    style A fill:#4a90e2,color:#fff
+    style B fill:#4a90e2,color:#fff
+    style C fill:#f5a623,color:#fff
+    style D fill:#7ed321,color:#fff
+    style E fill:#bd10e0,color:#fff
+    style F fill:#4a90e2,color:#fff
+```
 
 ## 📦 Installation
 
