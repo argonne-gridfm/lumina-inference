@@ -1,0 +1,20 @@
+LICENSE — TBD
+
+The license that will govern released LUMINA model weights has not
+yet been finalized by Argonne National Laboratory. Do not assume any
+particular license terms from the presence of this placeholder.
+
+To override this placeholder when staging a release, pass an explicit
+path via:
+
+    lumina-upload ... --license-path /path/to/your/LICENSE
+
+or, programmatically:
+
+    HFUploader(repo_id=..., license_path=Path("/path/to/your/LICENSE"))
+
+Until the license is settled, treat the released artifacts as
+"all rights reserved" by UChicago Argonne, LLC. This file will be
+replaced once the final license has been approved.
+
+Copyright (c) 2026, UChicago Argonne, LLC. All rights reserved.

@@ -44,15 +44,14 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
         torch_geometric>=2.4
 
-# Copy only dependency metadata first (layer caching)
-COPY pyproject.toml README.md LICENSE ./
-
-# Install project dependencies (without the package itself)
-RUN pip install --no-cache-dir .
-
-# Copy full source and install the package
+# Copy full source (pyproject.toml uses src-layout; setuptools needs
+# src/ present even to resolve packages.find).
 COPY . .
-RUN pip install --no-cache-dir .
+
+# Install the package with the [release] extra so the resulting image
+# can both run inference and exercise the uploader/test suite.
+# Also install pytest for the test target.
+RUN pip install --no-cache-dir ".[release]" pytest
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — lean image with only installed packages
