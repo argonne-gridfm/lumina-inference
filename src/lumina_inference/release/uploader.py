@@ -56,7 +56,12 @@ lumina-inference>=0.1.0
 
 
 def _write_default_license(dest: Path) -> None:
-    """Copy the bundled LICENSE (Apache-2.0 for released weights) to ``dest``.
+    """Copy the bundled LICENSE placeholder to ``dest``.
+
+    The bundled file is a **placeholder** ("LICENSE TBD") so releases
+    do not accidentally publish a default that hasn't been approved by
+    the team. Use ``HFUploader(license_path=...)`` or
+    ``lumina-upload --license-path ...`` to supply the final license.
 
     Uses ``importlib.resources`` so it works under both source checkouts
     and installed wheels.
@@ -65,6 +70,32 @@ def _write_default_license(dest: Path) -> None:
         resources.files("lumina_inference.release._data").joinpath("LICENSE")
     )
     dest.write_bytes(src.read_bytes())
+
+
+# Common LUMINA architecture keys; first match wins.
+_ARCH_PRIORITY = ("HGT", "HeteroGNN", "RGAT", "HEAT", "GCN", "GAT", "GIN", "Transformer")
+
+
+def _infer_arch_key(raw: Mapping[str, Any]) -> str:
+    """Best-effort architecture key (e.g. ``"HGT"``).
+
+    Tries the trailing component of ``model_class`` first, then falls
+    back to the first known architecture present in
+    ``raw["config"]["models"]``.
+    """
+    mc = raw.get("model_class") or raw.get("model_name")
+    if isinstance(mc, str):
+        tail = mc.rsplit(".", 1)[-1]
+        if tail:
+            return tail
+
+    models_cfg = (raw.get("config") or {}).get("models") or {}
+    for key in _ARCH_PRIORITY:
+        if key in models_cfg:
+            return key
+    if models_cfg:
+        return next(iter(models_cfg.keys()))
+    return "HGT"
 
 # Accept v0.2.0, v1.0.0-rc1, etc. Pre-release suffixes are allowed.
 _VERSION_RE = re.compile(
@@ -130,35 +161,139 @@ class HFUploader:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    def _build_modeler(self, checkpoint: dict) -> Modeler:
-        config_data = checkpoint.get("config_data") or checkpoint.get("config")
-        state_dict = checkpoint.get("model_state_dict") or checkpoint.get(
-            "state_dict"
-        )
-        if config_data is None or state_dict is None:
+    @staticmethod
+    def _normalize_checkpoint(
+        raw: Mapping[str, Any],
+    ) -> tuple[dict, dict, dict]:
+        """Adapt the raw checkpoint to the schema the rest of the code expects.
+
+        LUMINA training checkpoints (written by lumina-core) currently use:
+
+            {
+              "model_state_dict": OrderedDict,
+              "model_kwargs":     {"metadata", "input_channels",
+                                   "hidden_channels", "num_layers",
+                                   "num_heads", "backend", ...},
+              "config":           {..., "models": {"HGT": {...}, ...}},
+              "case_names":       list[str] | None,
+              "best_val_loss":    float,
+              "epoch":            int,
+              "model_class":      str,        # e.g. "lumina.model.opf.hetero_model.HGT"
+              "loss_type":        str,
+              ...
+            }
+
+        The lighter "pre-normalized" schema (used by older test fixtures
+        and by users who pre-package a checkpoint themselves) embeds
+        ``config_data`` and flat provenance directly. Both are accepted
+        here.
+
+        Returns:
+            ``(config_data, state_dict, provenance)`` where
+
+            * ``config_data`` is the dict consumed by
+              :meth:`Modeler.load_model`:
+              ``{"metadata", "input_channels", "config": {"models": {...}}}``.
+              Architecture parameters come from ``model_kwargs`` when
+              present (that's what the trainer actually used to build
+              the model); only the ``models`` slice of the training
+              ``config`` is carried through for reference.
+            * ``state_dict`` is the model weight dictionary.
+            * ``provenance`` has the stable keys ``case_names`` (list),
+              ``val_loss`` (float or None), ``epoch``, ``timestamp``,
+              ``model_class``, ``loss_type``.
+        """
+        # -- state_dict --------------------------------------------------
+        state_dict = raw.get("model_state_dict") or raw.get("state_dict")
+        if state_dict is None:
             raise ValueError(
-                "Checkpoint must contain both 'config_data' (or 'config') "
-                "and 'model_state_dict' (or 'state_dict')."
+                "Checkpoint must contain 'model_state_dict' (or 'state_dict')."
             )
+
+        # -- config_data: prefer pre-normalized form if present ----------
+        if "config_data" in raw and raw["config_data"]:
+            config_data = dict(raw["config_data"])
+        else:
+            model_kwargs = raw.get("model_kwargs") or {}
+            metadata = model_kwargs.get("metadata")
+            input_channels = model_kwargs.get("input_channels")
+            if metadata is None or input_channels is None:
+                raise ValueError(
+                    "Checkpoint is missing 'config_data' and the lumina "
+                    "fallback path requires both 'model_kwargs[metadata]' "
+                    "and 'model_kwargs[input_channels]'. "
+                    f"Got top-level keys: {sorted(raw.keys())}"
+                )
+
+            # Build the per-arch model config preferring model_kwargs
+            # (what the trainer actually used) and falling back to the
+            # training config for any unset hyperparameters.
+            arch_key = _infer_arch_key(raw)
+            config_models = (raw.get("config") or {}).get("models") or {}
+            training_arch_cfg = dict(config_models.get(arch_key, {}))
+
+            for hp in ("hidden_channels", "num_layers", "num_heads", "dropout"):
+                if hp in model_kwargs and model_kwargs[hp] is not None:
+                    training_arch_cfg[hp] = model_kwargs[hp]
+
+            config_data = {
+                "metadata": metadata,
+                "input_channels": input_channels,
+                "config": {"models": {arch_key: training_arch_cfg}},
+            }
+
+        # -- provenance --------------------------------------------------
+        # Accept singular or plural; coerce to a list.
+        case_names = (
+            raw.get("case_names")
+            if raw.get("case_names")
+            else raw.get("case_name")
+        )
+        if case_names is None:
+            case_names = []
+        elif isinstance(case_names, str):
+            case_names = [case_names]
+
+        val_loss = raw.get("val_loss")
+        if val_loss is None:
+            val_loss = raw.get("best_val_loss")
+
+        provenance = {
+            "case_names": list(case_names),
+            "val_loss": val_loss,
+            "epoch": raw.get("epoch", "Unknown"),
+            # Timestamp is not always present in lumina checkpoints; the
+            # uploader stamps the release date externally if needed.
+            "timestamp": raw.get("timestamp", "Unknown"),
+            "model_class": raw.get("model_class") or raw.get("model_name"),
+            "loss_type": raw.get("loss_type"),
+        }
+        return config_data, state_dict, provenance
+
+    def _build_modeler(
+        self, config_data: dict, state_dict: dict
+    ) -> Modeler:
         modeler = Modeler(self.device, verbose=False)
         modeler.load_model(config_data, state_dict)
         return modeler
 
-    def _checkpoint_to_history_entry(
-        self,
-        checkpoint: Mapping[str, Any],
+    @staticmethod
+    def _provenance_to_history_entry(
+        provenance: Mapping[str, Any],
         version: str,
     ) -> ReleaseHistoryEntry:
-        val_loss = checkpoint.get("val_loss")
+        val_loss = provenance.get("val_loss")
         val_loss_str = (
             "Unknown" if val_loss is None else f"{float(val_loss):.6f}"
         )
+        cases = provenance.get("case_names") or []
+        training_case = ", ".join(cases) if cases else "Unknown"
         return ReleaseHistoryEntry(
             version=version,
-            date=str(checkpoint.get("timestamp", "Unknown")),
-            epochs=str(checkpoint.get("epoch", "Unknown")),
+            date=str(provenance.get("timestamp", "Unknown")),
+            epochs=str(provenance.get("epoch", "Unknown")),
             val_loss=val_loss_str,
-            training_case=str(checkpoint.get("case_name", "Unknown")),
+            training_case=training_case,
             commit="pending",
         )
 
@@ -191,24 +326,24 @@ class HFUploader:
         staging_dir = Path(staging_dir)
         staging_dir.mkdir(parents=True, exist_ok=True)
 
-        checkpoint = self._load_checkpoint(checkpoint_path)
-        modeler = self._build_modeler(checkpoint)
+        raw_checkpoint = self._load_checkpoint(checkpoint_path)
+        config_data, state_dict, provenance = self._normalize_checkpoint(
+            raw_checkpoint
+        )
+        modeler = self._build_modeler(config_data, state_dict)
 
         # 1. Copy the raw .pt checkpoint
         shutil.copy2(checkpoint_path, staging_dir / "model.pt")
 
-        # 2. Write config.json (from config_data inside the checkpoint)
-        config_data = checkpoint.get("config_data") or checkpoint.get("config")
-        config_path = staging_dir / "config.json"
-        with config_path.open("w") as f:
+        # 2. Write config.json (the normalized config_data — what
+        #    Modeler.load_model() consumed; this is what HF users will
+        #    pass back through their own Modeler).
+        with (staging_dir / "config.json").open("w") as f:
             json.dump(_json_safe(config_data), f, indent=2, default=str)
 
         # 3. Write SafeTensors weights
         from safetensors.torch import save_file
 
-        state_dict = checkpoint.get("model_state_dict") or checkpoint.get(
-            "state_dict"
-        )
         # Ensure contiguous tensors (safetensors requirement)
         safe_state = {k: v.contiguous() for k, v in state_dict.items()}
         save_file(safe_state, str(staging_dir / "model.safetensors"))
@@ -216,7 +351,7 @@ class HFUploader:
         # 4. requirements.txt
         (staging_dir / "requirements.txt").write_text(DEFAULT_REQUIREMENTS)
 
-        # 5. LICENSE (bundled Apache-2.0 by default; explicit override allowed)
+        # 5. LICENSE (bundled placeholder by default; explicit override allowed)
         license_dest = staging_dir / "LICENSE"
         if self.license_path is None:
             _write_default_license(license_dest)
@@ -224,12 +359,12 @@ class HFUploader:
             if not self.license_path.exists():
                 raise FileNotFoundError(
                     f"LICENSE file not found at {self.license_path}; "
-                    "pass license_path=None to use the bundled default."
+                    "pass license_path=None to use the bundled placeholder."
                 )
             shutil.copy2(self.license_path, license_dest)
 
         # 6. Build Release History (prepend the current release)
-        new_entry = self._checkpoint_to_history_entry(checkpoint, version)
+        new_entry = self._provenance_to_history_entry(provenance, version)
         release_history = build_history(
             new_entry, existing_readme=existing_readme
         )
@@ -237,7 +372,7 @@ class HFUploader:
         # 7. README.md (the model card)
         card = generate_model_card(
             modeler,
-            checkpoint,
+            provenance,
             model_name=self.model_name,
             hf_repo_id=self.repo_id,
             model_version=version,

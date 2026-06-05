@@ -7,7 +7,7 @@ tags:
 - heterogeneous-graph
 library_name: pytorch
 pipeline_tag: other
-license: apache-2.0
+license: other
 ---
 
 # {model_name}

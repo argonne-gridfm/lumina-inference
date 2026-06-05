@@ -87,15 +87,20 @@ def _format_input_channels(input_channels: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _resolve_architecture(modeler: Modeler, checkpoint: Mapping[str, Any]) -> str:
-    """Best-effort architecture label (e.g. ``"HGT"``)."""
+def _resolve_architecture(modeler: Modeler, source: Mapping[str, Any]) -> str:
+    """Best-effort architecture label (e.g. ``"HGT"``).
+
+    Accepts either a normalized provenance dict (with ``model_class``)
+    or a raw checkpoint (with ``model_class`` / ``model_name`` /
+    ``model_kwargs``).
+    """
     if modeler.config_data is not None:
         models_cfg = modeler.config_data.get("config", {}).get("models", {})
-        for key in ("HGT", "HeteroGNN"):
+        for key in ("HGT", "HeteroGNN", "RGAT", "HEAT"):
             if key in models_cfg:
                 return key.upper()
 
-    arch = checkpoint.get("model_name") or checkpoint.get("model_class")
+    arch = source.get("model_class") or source.get("model_name")
     if isinstance(arch, str):
         return arch.split(".")[-1].upper()
 
@@ -105,22 +110,48 @@ def _resolve_architecture(modeler: Modeler, checkpoint: Mapping[str, Any]) -> st
 
 
 def _resolve_input_channels(
-    modeler: Modeler, checkpoint: Mapping[str, Any]
+    modeler: Modeler, source: Mapping[str, Any]
 ) -> Mapping[str, Any]:
-    """Prefer the loaded config; fall back to checkpoint metadata."""
+    """Prefer the loaded config; fall back to source-provided values."""
     if modeler.config_data is not None:
         ic = modeler.config_data.get("input_channels")
         if ic:
             return ic
-    ic = checkpoint.get("input_channels")
+    ic = source.get("input_channels")
     if ic:
         return ic
-    return checkpoint.get("model_kwargs", {}).get("input_channels", {}) or {}
+    return source.get("model_kwargs", {}).get("input_channels", {}) or {}
+
+
+def _resolve_training_case(source: Mapping[str, Any]) -> str:
+    """Render training case(s) for the card.
+
+    Handles the lumina trainer's ``case_names`` (plural list) and the
+    older ``case_name`` (singular string) seen in test fixtures.
+    """
+    case_names = source.get("case_names")
+    if case_names:
+        if isinstance(case_names, str):
+            return case_names
+        return ", ".join(str(c) for c in case_names)
+    case_name = source.get("case_name")
+    if case_name:
+        return str(case_name)
+    return "Unknown"
+
+
+def _resolve_val_loss(source: Mapping[str, Any]) -> str:
+    val_loss = source.get("val_loss")
+    if val_loss is None:
+        val_loss = source.get("best_val_loss")
+    if val_loss is None:
+        return "Unknown"
+    return f"{float(val_loss):.6f}"
 
 
 def generate_model_card(
     modeler: Modeler,
-    checkpoint: Mapping[str, Any],
+    source: Mapping[str, Any],
     model_name: str,
     hf_repo_id: str,
     *,
@@ -136,9 +167,17 @@ def generate_model_card(
         modeler: A :class:`Modeler` that has already had ``load_model``
             invoked. Used to derive architecture, parameter counts, and
             input channel schema from the live model.
-        checkpoint: The raw training checkpoint dict (as loaded with
-            ``torch.load``). Used for training provenance fields such
-            as ``case_name``, ``epoch``, ``val_loss``, and ``timestamp``.
+        source: Either a *normalized provenance* dict (as produced by
+            :meth:`HFUploader._normalize_checkpoint`) or a raw training
+            checkpoint. Used for training provenance fields. Recognized
+            keys (first non-empty wins for each field):
+
+            * case(s): ``case_names`` (preferred, list) or ``case_name``
+            * val loss: ``val_loss`` or ``best_val_loss``
+            * epoch: ``epoch``
+            * date:  ``timestamp``
+            * arch:  ``model_class`` or ``model_name``
+
         model_name: Public release name, e.g. ``"LUMINA-2M"``.
         hf_repo_id: Hugging Face repo identifier, e.g.
             ``"argonne/LUMINA-2M"``.
@@ -174,13 +213,8 @@ def generate_model_card(
         template = Path(template_path).read_text(encoding="utf-8")
 
     total_params, trainable_params = count_parameters(modeler.model)
-    arch = _resolve_architecture(modeler, checkpoint)
-    input_channels = _resolve_input_channels(modeler, checkpoint)
-
-    val_loss = checkpoint.get("val_loss")
-    final_validation_loss = (
-        "Unknown" if val_loss is None else f"{float(val_loss):.6f}"
-    )
+    arch = _resolve_architecture(modeler, source)
+    input_channels = _resolve_input_channels(modeler, source)
 
     return template.format(
         model_name=model_name,
@@ -193,10 +227,10 @@ def generate_model_card(
         total_parameters_formatted=format_parameter_count(total_params),
         trainable_parameters=f"{trainable_params:,}",
         trainable_parameters_formatted=format_parameter_count(trainable_params),
-        training_case=checkpoint.get("case_name", "Unknown"),
+        training_case=_resolve_training_case(source),
         training_data_size=training_data_size,
-        training_date=checkpoint.get("timestamp", "Unknown"),
-        final_validation_loss=final_validation_loss,
-        training_epochs=checkpoint.get("epoch", "Unknown"),
+        training_date=str(source.get("timestamp", "Unknown")),
+        final_validation_loss=_resolve_val_loss(source),
+        training_epochs=str(source.get("epoch", "Unknown")),
         input_channels=_format_input_channels(input_channels),
     )

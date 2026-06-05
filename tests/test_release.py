@@ -103,6 +103,12 @@ def _build_loaded_modeler():
 
 
 def _fake_checkpoint(config_data, state_dict):
+    """Pre-normalized checkpoint schema (legacy / test-friendly).
+
+    This is what an external maintainer might hand-craft before passing
+    to the uploader. The uploader's ``_normalize_checkpoint`` accepts
+    it as a fast-path (``config_data`` already present).
+    """
     return {
         "config_data": config_data,
         "model_state_dict": state_dict,
@@ -112,6 +118,47 @@ def _fake_checkpoint(config_data, state_dict):
         "timestamp": "20251112_193637",
         "model_name": "models.HGT",
         "input_channels": config_data["input_channels"],
+    }
+
+
+def _fake_lumina_checkpoint(config_data, state_dict):
+    """Real lumina-core training-checkpoint schema.
+
+    Mirrors the structure observed in actual checkpoints captured
+    under ``data/eagle/``: ``model_kwargs`` holds the *real* model
+    constructor arguments, ``config[models][HGT]`` may carry stale or
+    different hyperparameters, and provenance uses plural
+    ``case_names`` + ``best_val_loss``.
+    """
+    hgt_cfg = config_data["config"]["models"]["HGT"]
+    return {
+        "model_state_dict": state_dict,
+        "model_class": "lumina.model.opf.hetero_model.HGT",
+        "model_kwargs": {
+            "metadata": config_data["metadata"],
+            "input_channels": config_data["input_channels"],
+            "hidden_channels": hgt_cfg["hidden_channels"],
+            "num_layers": hgt_cfg["num_layers"],
+            "num_heads": hgt_cfg["num_heads"],
+            "backend": "sage",
+        },
+        "config": {
+            "models": {
+                "HGT": hgt_cfg,
+                "HeteroGNN": {"hidden_channels": 256, "num_layers": 6},
+            },
+            # Other sections present in real checkpoints, ignored by uploader
+            "training": {"batch_size": 32},
+        },
+        "case_names": [
+            "pglib_opf_case30_ieee",
+            "pglib_opf_case57_ieee",
+            "pglib_opf_case118_ieee",
+        ],
+        "best_val_loss": 0.012242,
+        "epoch": 27,
+        "loss_type": "augmented_lagrangian",
+        "run_metadata": {"world_size": 4},
     }
 
 
@@ -192,7 +239,7 @@ def test_generate_model_card_renders_all_placeholders():
     assert "pglib_opf_case14_ieee" in card
     assert "v0.1.0" in card
     assert "abcdef1" in card
-    assert "license: apache-2.0" in card
+    assert "license: other" in card
 
 
 def test_generate_model_card_unloaded_modeler_raises():
@@ -365,12 +412,17 @@ def test_stage_artifacts_writes_expected_files(tmp_path: Path):
     assert (staging / "README.md").is_file()
     assert (staging / "LICENSE").is_file()
 
-    # LICENSE content sanity check
-    assert "Apache License" in (staging / "LICENSE").read_text()
+    # LICENSE content sanity check (placeholder; final license is TBD)
+    license_text = (staging / "LICENSE").read_text()
+    assert "LICENSE — TBD" in license_text
 
-    # config.json should be valid JSON
+    # config.json is the *normalized* config_data: contains 'metadata',
+    # 'input_channels', and the 'config.models' arch slice. It does
+    # NOT contain training provenance (epoch / case_name / etc).
     cfg = json.loads((staging / "config.json").read_text())
-    assert cfg["case_name"] == "pglib_opf_case14_ieee"
+    assert "input_channels" in cfg
+    assert "metadata" in cfg
+    assert "HGT" in cfg["config"]["models"]
 
     # README should be the rendered model card with version + history
     readme = (staging / "README.md").read_text()
@@ -416,11 +468,29 @@ def test_stage_artifacts_extends_existing_history(tmp_path: Path):
 
 
 def test_stage_artifacts_rejects_bad_checkpoint(tmp_path: Path):
+    """Checkpoint without state_dict is rejected by the normalizer."""
     bad_path = tmp_path / "bad.pt"
     torch.save({"not_a_checkpoint": True}, bad_path)
 
     uploader = HFUploader(repo_id="org/repo")
-    with pytest.raises(ValueError, match="config_data"):
+    with pytest.raises(ValueError, match="model_state_dict"):
+        uploader.stage_artifacts(
+            bad_path, tmp_path / "staging", version="v0.1.0"
+        )
+
+
+def test_stage_artifacts_rejects_missing_model_kwargs(tmp_path: Path):
+    """Lumina-schema checkpoint without model_kwargs cannot be normalized."""
+    bad_path = tmp_path / "bad.pt"
+    torch.save(
+        {
+            "model_state_dict": {"x": torch.zeros(1)},
+            "config": {"models": {"HGT": {"hidden_channels": 8}}},
+        },
+        bad_path,
+    )
+    uploader = HFUploader(repo_id="org/repo")
+    with pytest.raises(ValueError, match="model_kwargs"):
         uploader.stage_artifacts(
             bad_path, tmp_path / "staging", version="v0.1.0"
         )
@@ -443,7 +513,7 @@ def test_stage_artifacts_missing_license_raises(tmp_path: Path):
 
 
 def test_stage_artifacts_default_license_is_bundled(tmp_path: Path):
-    """When license_path=None, the Apache-2.0 file ships from package data."""
+    """When license_path=None, the bundled placeholder ships from package data."""
     _, config_data, state_dict = _build_loaded_modeler()
     checkpoint = _fake_checkpoint(config_data, state_dict)
     checkpoint_path = tmp_path / "checkpoint.pt"
@@ -454,8 +524,120 @@ def test_stage_artifacts_default_license_is_bundled(tmp_path: Path):
         checkpoint_path, tmp_path / "staging", version="v0.1.0"
     )
     license_text = (tmp_path / "staging" / "LICENSE").read_text()
-    assert "Apache License" in license_text
-    assert "Version 2.0" in license_text
+    assert "LICENSE — TBD" in license_text
+    # Should mention the override flag so maintainers know how to supply
+    # the final license once it's approved.
+    assert "--license-path" in license_text
+
+
+# ---------------------------------------------------------------------------
+# Real lumina-core checkpoint schema (model_kwargs + config[models])
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_lumina_schema_extracts_config_data():
+    """The normalizer builds config_data from model_kwargs + config[models]."""
+    _, config_data, state_dict = _build_loaded_modeler()
+    raw = _fake_lumina_checkpoint(config_data, state_dict)
+
+    cfg, sd, prov = HFUploader._normalize_checkpoint(raw)
+
+    # Architecture hyperparameters come from model_kwargs (what the
+    # trainer actually used), not from the larger config[models][HGT].
+    assert cfg["input_channels"] == config_data["input_channels"]
+    assert cfg["metadata"] == config_data["metadata"]
+    assert "HGT" in cfg["config"]["models"]
+    assert cfg["config"]["models"]["HGT"]["hidden_channels"] == 8
+
+    # State dict passes through unchanged
+    assert sd is state_dict
+
+    # Provenance: plural case_names; val_loss from best_val_loss
+    assert prov["case_names"] == [
+        "pglib_opf_case30_ieee",
+        "pglib_opf_case57_ieee",
+        "pglib_opf_case118_ieee",
+    ]
+    assert prov["val_loss"] == 0.012242
+    assert prov["epoch"] == 27
+    assert prov["model_class"] == "lumina.model.opf.hetero_model.HGT"
+    assert prov["loss_type"] == "augmented_lagrangian"
+
+
+def test_normalize_lumina_schema_handles_none_case_names():
+    """case_names: None (seen on the 671M ckpt) becomes an empty list."""
+    _, config_data, state_dict = _build_loaded_modeler()
+    raw = _fake_lumina_checkpoint(config_data, state_dict)
+    raw["case_names"] = None
+    _, _, prov = HFUploader._normalize_checkpoint(raw)
+    assert prov["case_names"] == []
+
+
+def test_normalize_lumina_schema_model_kwargs_overrides_config():
+    """model_kwargs hyperparams win over config[models][arch] (stale fallback)."""
+    _, config_data, state_dict = _build_loaded_modeler()
+    raw = _fake_lumina_checkpoint(config_data, state_dict)
+    # Pretend the training config has a stale hidden_channels value
+    raw["config"]["models"]["HGT"]["hidden_channels"] = 9999
+    raw["model_kwargs"]["hidden_channels"] = 8  # what was really used
+    cfg, _, _ = HFUploader._normalize_checkpoint(raw)
+    assert cfg["config"]["models"]["HGT"]["hidden_channels"] == 8
+
+
+def test_normalize_legacy_schema_passes_through():
+    """The 'config_data is already present' fast-path still works."""
+    _, config_data, state_dict = _build_loaded_modeler()
+    raw = _fake_checkpoint(config_data, state_dict)
+    cfg, sd, prov = HFUploader._normalize_checkpoint(raw)
+    assert cfg == config_data
+    assert sd is state_dict
+    # Singular case_name promoted to list
+    assert prov["case_names"] == ["pglib_opf_case14_ieee"]
+    assert prov["val_loss"] == 0.082726
+
+
+def test_stage_artifacts_with_lumina_schema_end_to_end(tmp_path: Path):
+    """Full stage_artifacts on a real-shaped lumina checkpoint."""
+    _, config_data, state_dict = _build_loaded_modeler()
+    raw = _fake_lumina_checkpoint(config_data, state_dict)
+    checkpoint_path = tmp_path / "ckpt.pt"
+    torch.save(raw, checkpoint_path)
+
+    uploader = HFUploader(repo_id="argonne/LUMINA-2M")
+    result = uploader.stage_artifacts(
+        checkpoint_path, tmp_path / "stage", version="v0.1.0-rc1"
+    )
+
+    # All artifacts present
+    stage = tmp_path / "stage"
+    for f in ("model.pt", "model.safetensors", "config.json",
+              "requirements.txt", "README.md", "LICENSE"):
+        assert (stage / f).is_file(), f
+
+    # config.json is the normalized config_data
+    cfg = json.loads((stage / "config.json").read_text())
+    assert cfg["input_channels"] == config_data["input_channels"]
+    assert "HGT" in cfg["config"]["models"]
+    # Nothing from the training run leaks into config.json
+    assert "case_names" not in cfg
+    assert "epoch" not in cfg
+    assert "best_val_loss" not in cfg
+
+    # README rendered with real provenance
+    readme = (stage / "README.md").read_text()
+    assert "v0.1.0-rc1" in readme
+    assert "0.012242" in readme  # best_val_loss formatted
+    # All three case names joined
+    assert "pglib_opf_case30_ieee" in readme
+    assert "pglib_opf_case57_ieee" in readme
+    assert "pglib_opf_case118_ieee" in readme
+    assert "Training Epochs**: 27" in readme
+    assert "LUMINA-2M" in readme
+    # license_other front-matter (placeholder, not Apache-2.0)
+    assert "license: other" in readme
+
+    assert result.total_parameters > 0
+    assert result.version == "v0.1.0-rc1"
 
 
 # ---------------------------------------------------------------------------
