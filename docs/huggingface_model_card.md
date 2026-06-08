@@ -1,1 +1,0 @@
-../src/lumina_inference/release/_data/model_card_template.md
