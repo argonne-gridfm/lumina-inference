@@ -1,6 +1,6 @@
 """Utility functions for processing OPF datasets.
 
-Vendored from lumina-core dataset/opf/utils — edge index helpers only.
+Edge index helpers used during HeteroData construction.
 
 Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.

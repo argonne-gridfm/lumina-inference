@@ -1,6 +1,5 @@
 """Customized OPFDataset class for the ACOPF task (inference only).
 
-Vendored from lumina-core dataset/opf/opf_dataset.
 Supports the JSON data format produced by the public pglib-opf release.
 
 Copyright 2026 UChicago Argonne, LLC.
