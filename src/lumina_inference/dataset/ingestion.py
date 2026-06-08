@@ -691,50 +691,6 @@ def load_from_matpower(
     return process_opf_dict(opf_dict, require_solution=False)
 
 
-def load_from_hdf5(
-    path: Union[str, Path],
-    n_jobs: int = 1,
-) -> List[HeteroData]:
-    """Load OPF data from an HDF5 file and convert to a list of HeteroData.
-
-    HDF5 files may contain one or more scenarios (e.g., ACOPF solutions
-    or contingency analyses). Each scenario is converted to a separate
-    ``HeteroData`` object. Feature columns are automatically aligned
-    from the HDF5 schema to the canonical JSON schema using the
-    pydantic-based alignment maps in :mod:`lumina_inference.dataset.schema`.
-
-    This function requires ``h5py`` to be installed.
-
-    Args:
-        path: Path to the HDF5 (``.h5``) file.
-        n_jobs: Number of parallel jobs for processing scenarios.
-            Use ``1`` for sequential processing (default), ``-1`` for
-            all available cores.
-
-    Returns:
-        List[HeteroData]: One ``HeteroData`` per scenario (or per
-        post-contingency solution for contingency files).
-
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        ImportError: If ``h5py`` is not installed.
-
-    Example::
-
-        from lumina_inference import load_from_hdf5
-
-        data_list = load_from_hdf5("path/to/scenarios.h5")
-        # data_list[0] is a HeteroData for the first scenario
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"HDF5 file not found: {path}")
-
-    from lumina_inference.dataset.opf_dataset import process_hdf5_file
-
-    return process_hdf5_file(str(path), n_jobs=n_jobs)
-
-
 # ---------------------------------------------------------------------------
 # Generic HeteroData builder
 # ---------------------------------------------------------------------------

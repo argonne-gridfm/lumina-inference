@@ -35,10 +35,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-hdf5 = [
-    "h5py>=3.8",
-    "pydantic>=2.0",
-]
 release = [
     "huggingface_hub>=0.20",
 ]

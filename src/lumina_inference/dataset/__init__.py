@@ -3,7 +3,6 @@
 from lumina_inference.dataset.ingestion import (
     build_hetero_data,
     load_from_dict,
-    load_from_hdf5,
     load_from_json_file,
     load_from_json_string,
     load_from_matpower,
@@ -20,27 +19,15 @@ from lumina_inference.dataset.validation import (
     validate_opf_schema,
 )
 
-
-def __getattr__(name: str):
-    """Lazy import for optional-dependency symbols."""
-    if name == "process_hdf5_file":
-        from lumina_inference.dataset.opf_dataset import process_hdf5_file
-
-        return process_hdf5_file
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 __all__ = [
     # Dataset classes
     "OPFDataset",
     # Ingestion functions
     "build_hetero_data",
     "load_from_dict",
-    "load_from_hdf5",
     "load_from_json_file",
     "load_from_json_string",
     "load_from_matpower",
-    "process_hdf5_file",
     "process_json_file",
     "process_opf_dict",
     # Validation
