@@ -11,7 +11,7 @@ The Markdown template ships as package data at
 as ``docs/huggingface_model_card.md`` via a symlink in source checkouts)
 and uses :py:meth:`str.format` placeholders.
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

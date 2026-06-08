@@ -7,7 +7,7 @@ name = "lumina-inference"
 version = "0.1.0"
 description = "Lightweight inference package for LUMINA trained models — load from Hugging Face and run predictions."
 readme = "README.md"
-license = {text = "BSD-3-Clause"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [
     {name = "Argonne National Laboratory"},
@@ -16,7 +16,7 @@ keywords = ["optimal-power-flow", "graph-neural-network", "inference", "lumina"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: BSD License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

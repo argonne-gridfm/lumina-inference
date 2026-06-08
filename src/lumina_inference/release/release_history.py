@@ -9,7 +9,7 @@ preserved.
 Network access is optional: when the Hub is unreachable or the repo
 does not yet exist, history starts fresh.
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

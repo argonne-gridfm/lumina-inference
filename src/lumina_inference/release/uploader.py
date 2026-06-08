@@ -15,7 +15,7 @@ End-to-end workflow:
 This module imports :mod:`huggingface_hub` lazily so users running plain
 inference are not forced to install the upload-side extras.
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

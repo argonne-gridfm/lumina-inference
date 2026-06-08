@@ -7,7 +7,7 @@ tags:
 - heterogeneous-graph
 library_name: pytorch
 pipeline_tag: other
-license: other
+license: apache-2.0
 ---
 
 # {model_name}
@@ -162,5 +162,6 @@ This work was supported by the U.S. Department of Energy, Office of Science, Adv
 
 ## License
 
-Copyright (c) 2026, Argonne National Laboratory
-All rights reserved.
+Released under the Apache License, Version 2.0. See the bundled `LICENSE` and `NOTICE` files for the full terms and attribution.
+
+Copyright 2026 UChicago Argonne, LLC.

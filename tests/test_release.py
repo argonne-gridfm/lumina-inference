@@ -239,7 +239,7 @@ def test_generate_model_card_renders_all_placeholders():
     assert "pglib_opf_case14_ieee" in card
     assert "v0.1.0" in card
     assert "abcdef1" in card
-    assert "license: other" in card
+    assert "license: apache-2.0" in card
 
 
 def test_generate_model_card_unloaded_modeler_raises():
@@ -412,9 +412,10 @@ def test_stage_artifacts_writes_expected_files(tmp_path: Path):
     assert (staging / "README.md").is_file()
     assert (staging / "LICENSE").is_file()
 
-    # LICENSE content sanity check (placeholder; final license is TBD)
+    # LICENSE content sanity check (Apache-2.0, see issue #12)
     license_text = (staging / "LICENSE").read_text()
-    assert "LICENSE — TBD" in license_text
+    assert "Apache License" in license_text
+    assert "Version 2.0" in license_text
 
     # config.json is the *normalized* config_data: contains 'metadata',
     # 'input_channels', and the 'config.models' arch slice. It does
@@ -513,7 +514,7 @@ def test_stage_artifacts_missing_license_raises(tmp_path: Path):
 
 
 def test_stage_artifacts_default_license_is_bundled(tmp_path: Path):
-    """When license_path=None, the bundled placeholder ships from package data."""
+    """When license_path=None, the bundled Apache-2.0 LICENSE ships from package data."""
     _, config_data, state_dict = _build_loaded_modeler()
     checkpoint = _fake_checkpoint(config_data, state_dict)
     checkpoint_path = tmp_path / "checkpoint.pt"
@@ -524,10 +525,9 @@ def test_stage_artifacts_default_license_is_bundled(tmp_path: Path):
         checkpoint_path, tmp_path / "staging", version="v0.1.0"
     )
     license_text = (tmp_path / "staging" / "LICENSE").read_text()
-    assert "LICENSE — TBD" in license_text
-    # Should mention the override flag so maintainers know how to supply
-    # the final license once it's approved.
-    assert "--license-path" in license_text
+    assert "Apache License" in license_text
+    assert "Version 2.0" in license_text
+    assert "UChicago Argonne, LLC" in license_text
 
 
 # ---------------------------------------------------------------------------
@@ -633,8 +633,8 @@ def test_stage_artifacts_with_lumina_schema_end_to_end(tmp_path: Path):
     assert "pglib_opf_case118_ieee" in readme
     assert "Training Epochs**: 27" in readme
     assert "LUMINA-2M" in readme
-    # license_other front-matter (placeholder, not Apache-2.0)
-    assert "license: other" in readme
+    # Apache-2.0 front-matter (matches root LICENSE; see issue #12)
+    assert "license: apache-2.0" in readme
 
     assert result.total_parameters > 0
     assert result.version == "v0.1.0-rc1"

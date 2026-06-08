@@ -10,7 +10,7 @@ compatible with LUMINA models:
 - :func:`build_hetero_data` — Build HeteroData from raw node/edge dicts
 - :func:`process_opf_dict` — Core OPF dict → HeteroData converter
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 
