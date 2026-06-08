@@ -5,7 +5,7 @@ uploading them to the Hugging Face Hub. Not required for inference; the
 upload-side dependencies (huggingface_hub upload extras) are pulled in
 via the optional ``[release]`` extra.
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

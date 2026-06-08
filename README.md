@@ -249,6 +249,6 @@ Data loader with heterogeneous graph batching support.
 
 ## 📄 License
 
-BSD 3-Clause License. See [LICENSE](LICENSE) for details.
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for details.
 
-Copyright (c) 2026, UChicago Argonne, LLC. All rights reserved.
+Copyright 2026 UChicago Argonne, LLC.

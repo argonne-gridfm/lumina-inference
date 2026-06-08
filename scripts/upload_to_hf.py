@@ -36,7 +36,7 @@ pre-release suffix (e.g. ``v0.2.0-rc1``); see Option B in
 For an installed package, prefer the ``lumina-upload`` console script
 provided by ``pyproject.toml`` — it takes the same flags.
 
-Copyright (c) 2026, UChicago Argonne, LLC
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

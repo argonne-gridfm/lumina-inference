@@ -3,7 +3,7 @@
 Vendored from lumina-core loader/opf/opf_loader.
 No internal core dependencies — only torch and torch_geometric.
 
-Copyright (c) 2026, Argonne National Laboratory
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 

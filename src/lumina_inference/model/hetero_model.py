@@ -1,6 +1,6 @@
 """Heterogeneous Graph Transformer model for ACOPF inference.
 
-Copyright (c) 2026, Argonne National Laboratory
+Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 
