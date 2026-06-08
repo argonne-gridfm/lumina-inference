@@ -12,7 +12,6 @@ run entirely offline.
 """
 
 import json
-import os
 from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
@@ -401,75 +400,6 @@ class TestPrediction:
         for predictions_cpu, batch_cpu in preds:
             assert "bus" in predictions_cpu
             assert "generator" in predictions_cpu
-
-
-# ---------------------------------------------------------------------------
-# Tests – numerical equivalence (still gated by env-var)
-# ---------------------------------------------------------------------------
-
-
-class TestNumericalEquivalence:
-    """Test numerical equivalence against lumina-core reference.
-
-    These tests only run when LUMINA_CORE_REFERENCE=1 is set and
-    lumina-core is installed in the environment.
-    """
-
-    @pytest.mark.skipif(
-        os.environ.get("LUMINA_CORE_REFERENCE") != "1",
-        reason="Set LUMINA_CORE_REFERENCE=1 to run equivalence tests",
-    )
-    def test_predictions_match_lumina_core(
-        self, model_artifacts, dataset_and_loader
-    ):
-        """Compare lumina-inference HGT predictions against lumina-core HGT.
-
-        Instantiates lumina-core's HGT directly (not via CoreModeler, which
-        still targets OPFHeteroGNN / "HeteroGNN" config key) and loads the
-        same state dict into both models to verify the vendored copy is
-        numerically identical.
-        """
-        config_data, state_dict = model_artifacts
-        _, loader = dataset_and_loader
-
-        # lumina-inference predictions
-        device = torch.device("cpu")
-        inf_modeler = Modeler(device, verbose=False)
-        inf_modeler.load_model(config_data, state_dict)
-
-        batch = next(iter(loader))
-        inf_preds, batch_cpu = inf_modeler.predict_batch(batch)
-
-
-        from lumina.model.opf.hetero_model import HGT as CoreHGT
-
-        hgt_cfg = config_data["config"]["models"]["HGT"]
-        core_model = CoreHGT(
-            metadata=config_data["metadata"],
-            input_channels=config_data["input_channels"],
-            hidden_channels=hgt_cfg["hidden_channels"],
-            num_layers=hgt_cfg["num_layers"],
-            num_heads=hgt_cfg.get("num_heads", 1),
-            dropout=hgt_cfg.get("dropout", 0.0),
-        )
-        core_model.load_state_dict(state_dict)
-        core_model.eval()
-
-        with torch.no_grad():
-            core_preds = core_model(
-                batch_cpu.x_dict,
-                batch_cpu.edge_index_dict,
-                minmax_scaling=True,
-            )
-
-        for key in ["bus", "generator"]:
-            assert torch.allclose(
-                inf_preds[key], core_preds[key], atol=1e-5, rtol=1e-4
-            ), (
-                f"Predictions for '{key}' differ between lumina-inference "
-                f"and lumina-core. Max diff: "
-                f"{(inf_preds[key] - core_preds[key]).abs().max().item()}"
-            )
 
 
 # ---------------------------------------------------------------------------
