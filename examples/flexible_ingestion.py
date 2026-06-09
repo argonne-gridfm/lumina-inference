@@ -6,10 +6,9 @@ This script demonstrates all the ways to load data into LUMINA for inference,
  1. Load from a Python dictionary → predict
  2. Load from a JSON string → predict
  3. Load from a JSON file (process_json_file) → predict
- 4. Load from an HDF5 file → predict  (requires ``pip install h5py pydantic``)
- 5. Load from a MATPOWER .m file → predict  (requires ``pip install pandapower``)
- 6. Build generic HeteroData from raw arrays → predict
- 7. Schema validation utilities
+ 4. Load from a MATPOWER .m file → predict  (requires ``pip install pandapower``)
+ 5. Build generic HeteroData from raw arrays → predict
+ 6. Schema validation utilities
 
 Usage:
     python examples/flexible_ingestion.py
@@ -258,36 +257,11 @@ print()
 
 
 # ============================================================================
-# Example 4: Load from an HDF5 file → predict  (optional dependency)
+# Example 4: Load from MATPOWER .m file → predict  (optional dependency)
 # ============================================================================
 
 print("=" * 70)
-print("Example 4: HDF5 file → List[HeteroData] → predict_single()")
-print("=" * 70)
-
-try:
-    from lumina_inference import load_from_hdf5
-
-    print("  h5py is available — showing usage pattern:")
-    print()
-    print("    data_list = load_from_hdf5('path/to/scenarios.h5')")
-    print("    for i, data in enumerate(data_list):")
-    print("        preds = modeler.predict_single(data)")
-    print("        print(f'Scenario {i}: bus={preds[\"bus\"].shape}')")
-    print()
-    print("  For parallel processing of large files:")
-    print("    data_list = load_from_hdf5('scenarios.h5', n_jobs=-1)")
-except ImportError:
-    print("  h5py not installed — install with: pip install lumina-inference[hdf5]")
-print()
-
-
-# ============================================================================
-# Example 5: Load from MATPOWER .m file → predict  (optional dependency)
-# ============================================================================
-
-print("=" * 70)
-print("Example 5: MATPOWER .m file → HeteroData → predict_single()")
+print("Example 4: MATPOWER .m file → HeteroData → predict_single()")
 print("=" * 70)
 
 print("  Requires pandapower: pip install pandapower")
@@ -303,11 +277,11 @@ print()
 
 
 # ============================================================================
-# Example 6: Build generic HeteroData (non-OPF) → predict
+# Example 5: Build generic HeteroData (non-OPF) → predict
 # ============================================================================
 
 print("=" * 70)
-print("Example 6: Generic HeteroData (non-OPF) → predict_single()")
+print("Example 5: Generic HeteroData (non-OPF) → predict_single()")
 print("=" * 70)
 
 generic_data = build_hetero_data(
@@ -343,11 +317,11 @@ print()
 
 
 # ============================================================================
-# Example 7: Schema validation
+# Example 6: Schema validation
 # ============================================================================
 
 print("=" * 70)
-print("Example 7: Schema validation utilities")
+print("Example 6: Schema validation utilities")
 print("=" * 70)
 
 # Validate OPF data
@@ -397,7 +371,6 @@ print("""
   data = load_from_dict(opf_dict)          # Python dict
   data = load_from_json_string(json_str)   # JSON string
   data = load_from_json_file('data.json')  # JSON file
-  data = load_from_hdf5('data.h5')[0]      # HDF5 file (first scenario)
   data = load_from_matpower('case14.m')    # MATPOWER file
   data = build_hetero_data(nodes, edges)   # Raw arrays
 

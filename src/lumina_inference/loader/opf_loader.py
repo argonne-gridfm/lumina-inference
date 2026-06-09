@@ -1,7 +1,4 @@
-"""Data loader with heterogeneous graph batching support.
-
-Vendored from lumina-core loader/opf/opf_loader.
-No internal core dependencies — only torch and torch_geometric.
+"""DataLoader and Collater for batching torch_geometric HeteroData.
 
 Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
