@@ -189,7 +189,7 @@ class OPFDataset(InMemoryDataset):
             self.process_json_group(self.group_id)
         except Exception as e:
             print(f"Error processing group {self.group_id}: {e}")
-            raise e
+            raise
 
         print(f"Processed group {self.group_id}")
 
