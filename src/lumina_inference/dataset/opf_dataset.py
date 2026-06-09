@@ -14,7 +14,7 @@ import shutil
 import stat
 import warnings
 from glob import glob
-from typing import Callable, Dict, List, Literal, Optional, Union
+from typing import Callable, List, Literal, Optional, Union
 
 import torch
 import tqdm
