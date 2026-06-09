@@ -35,16 +35,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-release = [
-    "huggingface_hub>=0.20",
-]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
 ]
-
-[project.scripts]
-lumina-upload = "lumina_inference.release.uploader:main"
 
 [project.urls]
 Homepage = "https://github.com/argonne-gridfm/lumina-inference"
@@ -52,6 +46,3 @@ Repository = "https://github.com/argonne-gridfm/lumina-inference"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"lumina_inference.release._data" = ["*"]
