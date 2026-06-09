@@ -48,10 +48,11 @@ RUN pip install --no-cache-dir \
 # src/ present even to resolve packages.find).
 COPY . .
 
-# Install the package with the [release] extra so the resulting image
-# can both run inference and exercise the uploader/test suite.
-# Also install pytest for the test target.
-RUN pip install --no-cache-dir ".[release]" pytest
+# Install the package with the [dev] extra (pytest + pytest-cov) so the
+# resulting image can both run inference and execute the test suite.
+# Release/upload tooling lives in the separate argonne-gridfm/lumina-release
+# repo and is not bundled here.
+RUN pip install --no-cache-dir ".[dev]"
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime — lean image with only installed packages
@@ -68,7 +69,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY examples/ ./examples/
 COPY tests/ ./tests/
 COPY docs/ ./docs/
-COPY README.md LICENSE ./
+COPY README.md LICENSE NOTICE ./
 
 # Create non-root user for security
 RUN groupadd -r lumina && useradd -r -g lumina -d /app -s /sbin/nologin lumina \
