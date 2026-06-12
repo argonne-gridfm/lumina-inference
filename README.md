@@ -46,33 +46,19 @@ pip install -e .
 ### 🔌 Standard OPF Dataset Pipeline
 
 ```python
-import json
 import torch
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
 
 from lumina_inference.modeler import Modeler
 from lumina_inference.dataset.opf_dataset import OPFDataset
 from lumina_inference.loader.opf_loader import DataLoader
 
-# Download model artifacts from Hugging Face
-config_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="config.json")
-safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="model.safetensors")
-
-# Load config
-with open(config_path, "r") as f:
-    config_data = json.load(f)
-
-# Set up device and modeler
+# Initialize and download model from Hugging Face
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 modeler = Modeler(device)
-
-# Load model
-state_dict = load_file(safetensors_path)
-modeler.load_model(config_data, state_dict)
+modeler.from_pretrained("argonne/LUMINA-2M")
 
 # Load dataset and create loader
-case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
+case_name = modeler.config_data.get("case_name", "pglib_opf_case14_ieee")
 dataset = OPFDataset(root="./opf_data", case_name=case_name)
 loader = DataLoader(dataset, batch_size=1, shuffle=False)
 

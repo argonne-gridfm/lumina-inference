@@ -162,7 +162,7 @@ def init_modeler(device=None):
 
     try:
         modeler = Modeler(device)
-        modeler.from_pretrained("argonne/LUMINA-OPF-HGNN")
+        modeler.from_pretrained("argonne/LUMINA-2M")
         return modeler
     except Exception as e:
         print(f"  [WARN] Could not load model: {e}")
@@ -365,7 +365,7 @@ print("=" * 70)
 print("""
   # 1. Initialize the modeler (once)
   modeler = Modeler(torch.device('cpu'))
-  modeler.from_pretrained('argonne/LUMINA-OPF-HGNN')
+  modeler.from_pretrained('argonne/LUMINA-2M')
 
   # 2. Load data from ANY source
   data = load_from_dict(opf_dict)          # Python dict

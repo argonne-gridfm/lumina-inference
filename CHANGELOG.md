@@ -6,4 +6,4 @@ Initial release candidate.
 
 - Self-contained inference for LUMINA OPF models (HGT architecture)
 - Flexible ingestion: Python dict, JSON file/string, MATPOWER `.m`
-- HuggingFace model loading via `Modeler`
+- HuggingFace model loading via `Modeler.from_pretrained()` or `Modeler.load_model()`
