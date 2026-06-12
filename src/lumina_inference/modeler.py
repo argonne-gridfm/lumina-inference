@@ -139,7 +139,9 @@ class Modeler:
             ``"unexpected_keys"``.
 
         Raises:
-            ValueError: If ``fail_on_missing`` is True and missing keys
+            ValueError: If any layer in ``checkpoint_dict`` has a shape
+                that differs from the corresponding layer in ``model``,
+                or if ``fail_on_missing`` is True and missing keys
                 are found.
         """
         model_state = model.state_dict()
@@ -155,6 +157,41 @@ class Modeler:
         unexpected_keys = [
             k for k in checkpoint_dict.keys() if k not in used_keys
         ]
+
+        # Pre-check: shape mismatches between checkpoint and freshly
+        # constructed model. These otherwise surface as a cryptic
+        # RuntimeError from torch.load_state_dict; we want to flag them
+        # as a config / checkpoint inconsistency before that point.
+        shape_mismatches = []
+        for key, ckpt_tensor in remapped_state.items():
+            model_tensor = model_state[key]
+            if (
+                hasattr(ckpt_tensor, "shape")
+                and hasattr(model_tensor, "shape")
+                and tuple(ckpt_tensor.shape) != tuple(model_tensor.shape)
+            ):
+                shape_mismatches.append(
+                    (key, tuple(ckpt_tensor.shape), tuple(model_tensor.shape))
+                )
+
+        if shape_mismatches:
+            preview = shape_mismatches[:5]
+            lines = [
+                f"  - {key}: checkpoint {ck} vs config {cfg}"
+                for key, ck, cfg in preview
+            ]
+            if len(shape_mismatches) > len(preview):
+                lines.append(
+                    f"  ... and {len(shape_mismatches) - len(preview)} more"
+                )
+            raise ValueError(
+                f"Config / checkpoint shape mismatch "
+                f"({len(shape_mismatches)} layer(s)):\n"
+                + "\n".join(lines)
+                + "\nThis usually means input_channels or model "
+                  "hyperparameters in the config do not match the trained "
+                  "checkpoint."
+            )
 
         load_result = model.load_state_dict(remapped_state, strict=False)
         missing_keys = list(load_result.missing_keys)
