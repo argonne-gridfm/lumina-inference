@@ -1,10 +1,16 @@
 # ⚡ lumina-inference
 
+[![Version](https://img.shields.io/badge/version-0.1.0rc1-blue)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C)](https://pytorch.org/)
+[![PyTorch Geometric](https://img.shields.io/badge/PyG-2.4%2B-3C2179)](https://pytorch-geometric.readthedocs.io/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 Lightweight inference package for **LUMINA** trained models. Load models from Hugging Face and run predictions.
 
 ```mermaid
 flowchart LR
-    A["🔧 Initialize<br/><b>Device + Modeler</b>"] --> B["📦 Load Artifacts<br/>+ Build Model<br/><b>Artifacts → OPFHeteroGNN</b>"]
+    A["🔧 Initialize<br/><b>Device + Modeler</b>"] --> B["📦 Load Artifacts<br/>+ Build Model<br/><b>Artifacts → HGT</b>"]
     B --> C{"Data Ingestion<br/>Pathway"}
     C -->|Pathway A| D["📊 Batch Pipeline<br/><b>OPFDataset → DataLoader → Batch</b>"]
     C -->|Pathway B| E["🎯 Single-Sample Ingestion<br/><b>load_from_* → HeteroData</b>"]
@@ -50,8 +56,8 @@ from lumina_inference.dataset.opf_dataset import OPFDataset
 from lumina_inference.loader.opf_loader import DataLoader
 
 # Download model artifacts from Hugging Face
-config_path = hf_hub_download(repo_id="argonne/LUMINA-1B", filename="config.json")
-safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-1B", filename="model.safetensors")
+config_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="config.json")
+safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="model.safetensors")
 
 # Load config
 with open(config_path, "r") as f:
@@ -118,7 +124,7 @@ data = build_hetero_data(
 )
 ```
 
-> 📖 See [docs/flexible_ingestion.md](docs/flexible_ingestion.md) for the full guide and [examples/flexible_ingestion.py](examples/flexible_ingestion.py) for runnable examples.
+> 📖 See [examples/flexible_ingestion.py](examples/flexible_ingestion.py) for runnable examples.
 
 ## 🗂️ Model Artifacts
 

@@ -7,7 +7,7 @@ Copyright 2026 UChicago Argonne, LLC.
 All rights reserved.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.0rc1"
 
 from lumina_inference.dataset.ingestion import (
     build_hetero_data,

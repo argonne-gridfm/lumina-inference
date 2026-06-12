@@ -22,10 +22,10 @@ from lumina_inference.loader.opf_loader import DataLoader
 
 # Download model artifacts from Hugging Face
 config_path = hf_hub_download(
-    repo_id="argonne/LUMINA-1B", filename="config.json"
+    repo_id="argonne/LUMINA-2M", filename="config.json"
 )
 safetensors_path = hf_hub_download(
-    repo_id="argonne/LUMINA-1B", filename="model.safetensors"
+    repo_id="argonne/LUMINA-2M", filename="model.safetensors"
 )
 
 # Load config
