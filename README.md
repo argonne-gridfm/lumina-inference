@@ -110,6 +110,12 @@ data = build_hetero_data(
 )
 ```
 
+> ⚠️ Published LUMINA models (e.g. `argonne/LUMINA-2M`) are trained on
+> the OPF schema (`bus` / `generator` / `load` / `shunt`); calling
+> `predict_single` on a generic graph will fail schema validation
+> against those checkpoints. To run inference on a non-OPF schema you
+> need a model trained on that schema.
+
 > 📖 See [examples/flexible_ingestion.py](examples/flexible_ingestion.py) for runnable examples.
 
 ## 🗂️ Model Artifacts
@@ -128,7 +134,7 @@ These are downloaded automatically via `huggingface_hub.hf_hub_download()`.
 The package uses the **OPFData** heterogeneous graph format with the following node and edge types:
 
 ### 🟢 Node Types
-- **`bus`**: Power system buses with features `[base_kv, vmin, vmax, bus_type_onehot...]` (7 features)
+- **`bus`**: Power system buses. Raw input shape `[base_kv, bus_type, vmin, vmax]` (4); after one-hot encoding `bus_type`, the processed feature order is `[base_kv, vmin, vmax, pq, pv, ref, isolated]` (7 features)
 - **`generator`**: Generators with features `[mbase, pg, pmin, pmax, qg, qmin, qmax, vg, costs...]` (11 features)
 - **`load`**: Loads with features `[pd, qd]` (2 features)
 - **`shunt`**: Shunts with features `[bs, gs]` (2 features)
