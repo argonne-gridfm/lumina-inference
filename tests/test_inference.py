@@ -308,6 +308,115 @@ class TestModelLoading:
             mock_dl.assert_not_called()
 
 
+class TestShapeMismatchValidation:
+    """Issue #10 — config / checkpoint shape mismatch should raise ValueError
+    with a user-friendly message, not a PyTorch RuntimeError."""
+
+    def _build_minimal_config(self):
+        return {
+            "metadata": {
+                "nodes": {"bus": {}, "generator": {}},
+                "edges": {
+                    ("bus", "to", "bus"): {},
+                    ("generator", "to", "bus"): {},
+                },
+            },
+            "input_channels": {"bus": 7, "generator": 4},
+            "config": {
+                "models": {
+                    "HGT": {
+                        "hidden_channels": 16,
+                        "num_layers": 2,
+                        "num_heads": 1,
+                    }
+                }
+            },
+        }
+
+    def _state_dict_for(self, config):
+        import copy
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        model, _ = modeler.load_model(copy.deepcopy(config), {})
+        return {k: v.clone() for k, v in model.state_dict().items()}
+
+    def test_input_channel_mismatch_raises_valueerror(self):
+        import copy
+
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        bad = copy.deepcopy(config)
+        bad["input_channels"]["bus"] = 8  # stale config
+
+        with pytest.raises(ValueError, match="Config / checkpoint shape mismatch"):
+            Modeler(torch.device("cpu"), verbose=False).load_model(bad, state)
+
+    def test_hidden_channels_mismatch_raises_valueerror(self):
+        import copy
+
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        bad = copy.deepcopy(config)
+        bad["config"]["models"]["HGT"]["hidden_channels"] = 32
+
+        with pytest.raises(ValueError, match="shape mismatch"):
+            Modeler(torch.device("cpu"), verbose=False).load_model(bad, state)
+
+    def test_matching_shapes_load_ok(self):
+        """Same config used to build the checkpoint should load cleanly."""
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, state)
+        assert modeler.model is not None
+
+
+class TestHGTMetadataValidation:
+    """Issue #10 — HGT() should reject metadata that is missing required
+    output node types ('bus' and 'generator')."""
+
+    def test_missing_generator_raises(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        with pytest.raises(ValueError, match="generator"):
+            HGT(
+                metadata=(["bus", "load"], [("bus", "x", "load")]),
+                input_channels={"bus": 7, "load": 2},
+                hidden_channels=8,
+                num_layers=1,
+                num_heads=1,
+            )
+
+    def test_missing_bus_raises(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        with pytest.raises(ValueError, match="bus"):
+            HGT(
+                metadata=(["generator", "load"], [("generator", "x", "load")]),
+                input_channels={"generator": 4, "load": 2},
+                hidden_channels=8,
+                num_layers=1,
+                num_heads=1,
+            )
+
+    def test_both_required_nodes_present_constructs_ok(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        HGT(
+            metadata=(
+                ["bus", "generator"],
+                [("bus", "to", "bus"), ("generator", "to", "bus")],
+            ),
+            input_channels={"bus": 7, "generator": 4},
+            hidden_channels=8,
+            num_layers=1,
+            num_heads=1,
+        )
+
+
 class TestFromPretrained:
     """Test Modeler.from_pretrained() with mocked HuggingFace + SafeTensors."""
 
