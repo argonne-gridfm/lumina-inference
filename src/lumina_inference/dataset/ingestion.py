@@ -11,7 +11,18 @@ compatible with LUMINA models:
 - :func:`process_opf_dict` — Core OPF dict → HeteroData converter
 
 Copyright 2026 UChicago Argonne, LLC.
-All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
 """
 
 import json
@@ -484,12 +495,12 @@ def load_from_matpower(
         )
     for row_idx in np.where(gencost[:, 3] > 3)[0]:
         ncost = int(gencost[row_idx, 3])
-        if np.any(gencost[row_idx, 4 : 4 + ncost - 3] != 0):
+        if np.any(gencost[row_idx, 4: 4 + ncost - 3] != 0):
             raise ValueError(
                 f"Unsupported non-zero higher-order gencost terms in row "
                 f"{int(row_idx)}"
             )
-        gencost[row_idx, 4:7] = gencost[row_idx, 4 + ncost - 3 : 4 + ncost]
+        gencost[row_idx, 4:7] = gencost[row_idx, 4 + ncost - 3: 4 + ncost]
         gencost[row_idx, 3] = 3
 
     # Convert to per-unit power basis
