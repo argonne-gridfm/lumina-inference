@@ -69,11 +69,15 @@ class Modeler:
 
     Example:
         >>> modeler = Modeler(torch.device("cpu"))
+        >>> modeler.from_pretrained("argonne/LUMINA-2M")
+        >>> loader = DataLoader(dataset, batch_size=1)
+        >>> preds = modeler.run_predictions(loader, max_batches=10)
+
+        # Or load weights manually:
+        >>> modeler = Modeler(torch.device("cpu"))
         >>> config = json.load(open("config.json"))
         >>> state_dict = load_file("model.safetensors")
         >>> modeler.load_model(config, state_dict)
-        >>> loader = DataLoader(dataset, batch_size=1)
-        >>> preds = modeler.run_predictions(loader, max_batches=10)
     """
 
     def __init__(
@@ -146,7 +150,9 @@ class Modeler:
             ``"unexpected_keys"``.
 
         Raises:
-            ValueError: If ``fail_on_missing`` is True and missing keys
+            ValueError: If any layer in ``checkpoint_dict`` has a shape
+                that differs from the corresponding layer in ``model``,
+                or if ``fail_on_missing`` is True and missing keys
                 are found.
         """
         model_state = model.state_dict()
@@ -162,6 +168,41 @@ class Modeler:
         unexpected_keys = [
             k for k in checkpoint_dict.keys() if k not in used_keys
         ]
+
+        # Pre-check: shape mismatches between checkpoint and freshly
+        # constructed model. These otherwise surface as a cryptic
+        # RuntimeError from torch.load_state_dict; we want to flag them
+        # as a config / checkpoint inconsistency before that point.
+        shape_mismatches = []
+        for key, ckpt_tensor in remapped_state.items():
+            model_tensor = model_state[key]
+            if (
+                hasattr(ckpt_tensor, "shape")
+                and hasattr(model_tensor, "shape")
+                and tuple(ckpt_tensor.shape) != tuple(model_tensor.shape)
+            ):
+                shape_mismatches.append(
+                    (key, tuple(ckpt_tensor.shape), tuple(model_tensor.shape))
+                )
+
+        if shape_mismatches:
+            preview = shape_mismatches[:5]
+            lines = [
+                f"  - {key}: checkpoint {ck} vs config {cfg}"
+                for key, ck, cfg in preview
+            ]
+            if len(shape_mismatches) > len(preview):
+                lines.append(
+                    f"  ... and {len(shape_mismatches) - len(preview)} more"
+                )
+            raise ValueError(
+                f"Config / checkpoint shape mismatch "
+                f"({len(shape_mismatches)} layer(s)):\n"
+                + "\n".join(lines)
+                + "\nThis usually means input_channels or model "
+                  "hyperparameters in the config do not match the trained "
+                  "checkpoint."
+            )
 
         load_result = model.load_state_dict(remapped_state, strict=False)
         missing_keys = list(load_result.missing_keys)
@@ -240,6 +281,76 @@ class Modeler:
         self.model = model
         self.config_data = config_data
         return model, config_data
+
+    # -- convenience loader ---------------------------------------------------
+
+    def from_pretrained(
+        self,
+        repo_id: str,
+        *,
+        revision: Optional[str] = None,
+        token: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+    ) -> "Modeler":
+        """Download a published LUMINA model from Hugging Face and load it.
+
+        Convenience wrapper around ``hf_hub_download`` + ``load_model``.
+        Fetches ``config.json`` and ``model.safetensors`` from the given
+        repo and feeds them through :meth:`load_model`.
+
+        Args:
+            repo_id: Hugging Face repo identifier, e.g.
+                ``"argonne/LUMINA-2M"``.
+            revision: Optional git revision (branch, tag, or commit SHA).
+                Defaults to the repo's default branch.
+            token: Optional Hugging Face access token. Falls back to the
+                cached CLI token / ``HF_TOKEN`` env var when ``None``.
+            cache_dir: Optional override for the local HF cache directory.
+
+        Returns:
+            Modeler: ``self``, with ``model`` and ``config_data`` set.
+            Returning ``self`` enables chaining, e.g.
+            ``Modeler(device).from_pretrained("argonne/LUMINA-2M")``.
+
+        Raises:
+            ImportError: If ``huggingface_hub`` is not installed.
+            Any error raised by ``hf_hub_download`` (network, auth,
+            repo not found) propagates unchanged.
+
+        Example:
+            >>> modeler = Modeler(torch.device("cpu"))
+            >>> modeler.from_pretrained("argonne/LUMINA-2M")
+            >>> predictions = modeler.predict_single(data)
+        """
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise ImportError(
+                "huggingface_hub is required for from_pretrained(). "
+                "Install with: pip install huggingface_hub"
+            ) from exc
+
+        import json
+
+        from safetensors.torch import load_file
+
+        download_kwargs = {"repo_id": repo_id, "token": token}
+        if revision is not None:
+            download_kwargs["revision"] = revision
+        if cache_dir is not None:
+            download_kwargs["cache_dir"] = cache_dir
+
+        config_path = hf_hub_download(filename="config.json", **download_kwargs)
+        weights_path = hf_hub_download(
+            filename="model.safetensors", **download_kwargs
+        )
+
+        with open(config_path, "r") as f:
+            config_data = json.load(f)
+        state_dict = load_file(weights_path)
+
+        self.load_model(config_data, state_dict)
+        return self
 
     # -- helpers for tensors --------------------------------------------------
 

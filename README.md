@@ -1,10 +1,16 @@
 # ⚡ lumina-inference
 
+[![Version](https://img.shields.io/badge/version-0.1.0rc1-blue)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C)](https://pytorch.org/)
+[![PyTorch Geometric](https://img.shields.io/badge/PyG-2.4%2B-3C2179)](https://pytorch-geometric.readthedocs.io/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
 Lightweight inference package for **LUMINA** trained models. Load models from Hugging Face and run predictions.
 
 ```mermaid
 flowchart LR
-    A["🔧 Initialize<br/><b>Device + Modeler</b>"] --> B["📦 Load Artifacts<br/>+ Build Model<br/><b>Artifacts → OPFHeteroGNN</b>"]
+    A["🔧 Initialize<br/><b>Device + Modeler</b>"] --> B["📦 Load Artifacts<br/>+ Build Model<br/><b>Artifacts → HGT</b>"]
     B --> C{"Data Ingestion<br/>Pathway"}
     C -->|Pathway A| D["📊 Batch Pipeline<br/><b>OPFDataset → DataLoader → Batch</b>"]
     C -->|Pathway B| E["🎯 Single-Sample Ingestion<br/><b>load_from_* → HeteroData</b>"]
@@ -40,33 +46,19 @@ pip install -e .
 ### 🔌 Standard OPF Dataset Pipeline
 
 ```python
-import json
 import torch
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
 
 from lumina_inference.modeler import Modeler
 from lumina_inference.dataset.opf_dataset import OPFDataset
 from lumina_inference.loader.opf_loader import DataLoader
 
-# Download model artifacts from Hugging Face
-config_path = hf_hub_download(repo_id="argonne/LUMINA-1B", filename="config.json")
-safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-1B", filename="model.safetensors")
-
-# Load config
-with open(config_path, "r") as f:
-    config_data = json.load(f)
-
-# Set up device and modeler
+# Initialize and download model from Hugging Face
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 modeler = Modeler(device)
-
-# Load model
-state_dict = load_file(safetensors_path)
-modeler.load_model(config_data, state_dict)
+modeler.from_pretrained("argonne/LUMINA-2M")
 
 # Load dataset and create loader
-case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
+case_name = modeler.config_data.get("case_name", "pglib_opf_case14_ieee")
 dataset = OPFDataset(root="./opf_data", case_name=case_name)
 loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
@@ -118,7 +110,13 @@ data = build_hetero_data(
 )
 ```
 
-> 📖 See [docs/flexible_ingestion.md](docs/flexible_ingestion.md) for the full guide and [examples/flexible_ingestion.py](examples/flexible_ingestion.py) for runnable examples.
+> ⚠️ Published LUMINA models (e.g. `argonne/LUMINA-2M`) are trained on
+> the OPF schema (`bus` / `generator` / `load` / `shunt`); calling
+> `predict_single` on a generic graph will fail schema validation
+> against those checkpoints. To run inference on a non-OPF schema you
+> need a model trained on that schema.
+
+> 📖 See [examples/flexible_ingestion.py](examples/flexible_ingestion.py) for runnable examples.
 
 ## 🗂️ Model Artifacts
 
@@ -136,7 +134,7 @@ These are downloaded automatically via `huggingface_hub.hf_hub_download()`.
 The package uses the **OPFData** heterogeneous graph format with the following node and edge types:
 
 ### 🟢 Node Types
-- **`bus`**: Power system buses with features `[base_kv, vmin, vmax, bus_type_onehot...]` (7 features)
+- **`bus`**: Power system buses. Raw input shape `[base_kv, bus_type, vmin, vmax]` (4); after one-hot encoding `bus_type`, the processed feature order is `[base_kv, vmin, vmax, pq, pv, ref, isolated]` (7 features)
 - **`generator`**: Generators with features `[mbase, pg, pmin, pmax, qg, qmin, qmax, vg, costs...]` (11 features)
 - **`load`**: Loads with features `[pd, qd]` (2 features)
 - **`shunt`**: Shunts with features `[bs, gs]` (2 features)

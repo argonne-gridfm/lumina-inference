@@ -63,6 +63,17 @@ class HGT(torch.nn.Module):
                 tuple(et) if isinstance(et, list) else et for et in metadata[1]
             ]
 
+        # HGT.forward indexes x_dict by these output node types unconditionally;
+        # missing entries cause a KeyError at inference rather than at construction.
+        REQUIRED_OUTPUT_NODES = ("bus", "generator")
+        missing = [n for n in REQUIRED_OUTPUT_NODES if n not in self.node_types]
+        if missing:
+            raise ValueError(
+                f"HGT requires output node types {list(REQUIRED_OUTPUT_NODES)} "
+                f"to be present in metadata.nodes; missing: {missing}. "
+                f"Got node_types={self.node_types}."
+            )
+
         # Validate input_channels
         if not isinstance(input_channels, dict):
             raise ValueError("input_channels must be a dictionary")

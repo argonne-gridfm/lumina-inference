@@ -55,7 +55,7 @@ AC_LINE_EDGE_ATTR_DIM = 9
 
 
 def _make_fake_config():
-    """Return a realistic config_data dict matching LUMINA-1B structure."""
+    """Return a realistic config_data dict matching LUMINA-2M structure."""
     return {
         "case_name": "pglib_opf_case14_ieee",
         "metadata": {
@@ -320,6 +320,269 @@ class TestModelLoading:
             modeler = Modeler(device, verbose=False)
             modeler.load_model(fake_config, fake_state_dict)
             mock_dl.assert_not_called()
+
+
+class TestShapeMismatchValidation:
+    """Issue #10 — config / checkpoint shape mismatch should raise ValueError
+    with a user-friendly message, not a PyTorch RuntimeError."""
+
+    def _build_minimal_config(self):
+        return {
+            "metadata": {
+                "nodes": {"bus": {}, "generator": {}},
+                "edges": {
+                    ("bus", "to", "bus"): {},
+                    ("generator", "to", "bus"): {},
+                },
+            },
+            "input_channels": {"bus": 7, "generator": 4},
+            "config": {
+                "models": {
+                    "HGT": {
+                        "hidden_channels": 16,
+                        "num_layers": 2,
+                        "num_heads": 1,
+                    }
+                }
+            },
+        }
+
+    def _state_dict_for(self, config):
+        import copy
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        model, _ = modeler.load_model(copy.deepcopy(config), {})
+        return {k: v.clone() for k, v in model.state_dict().items()}
+
+    def test_input_channel_mismatch_raises_valueerror(self):
+        import copy
+
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        bad = copy.deepcopy(config)
+        bad["input_channels"]["bus"] = 8  # stale config
+
+        with pytest.raises(ValueError, match="Config / checkpoint shape mismatch"):
+            Modeler(torch.device("cpu"), verbose=False).load_model(bad, state)
+
+    def test_hidden_channels_mismatch_raises_valueerror(self):
+        import copy
+
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        bad = copy.deepcopy(config)
+        bad["config"]["models"]["HGT"]["hidden_channels"] = 32
+
+        with pytest.raises(ValueError, match="shape mismatch"):
+            Modeler(torch.device("cpu"), verbose=False).load_model(bad, state)
+
+    def test_matching_shapes_load_ok(self):
+        """Same config used to build the checkpoint should load cleanly."""
+        config = self._build_minimal_config()
+        state = self._state_dict_for(config)
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, state)
+        assert modeler.model is not None
+
+
+class TestHGTMetadataValidation:
+    """Issue #10 — HGT() should reject metadata that is missing required
+    output node types ('bus' and 'generator')."""
+
+    def test_missing_generator_raises(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        with pytest.raises(ValueError, match="generator"):
+            HGT(
+                metadata=(["bus", "load"], [("bus", "x", "load")]),
+                input_channels={"bus": 7, "load": 2},
+                hidden_channels=8,
+                num_layers=1,
+                num_heads=1,
+            )
+
+    def test_missing_bus_raises(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        with pytest.raises(ValueError, match="bus"):
+            HGT(
+                metadata=(["generator", "load"], [("generator", "x", "load")]),
+                input_channels={"generator": 4, "load": 2},
+                hidden_channels=8,
+                num_layers=1,
+                num_heads=1,
+            )
+
+    def test_both_required_nodes_present_constructs_ok(self):
+        from lumina_inference.model.hetero_model import HGT
+
+        HGT(
+            metadata=(
+                ["bus", "generator"],
+                [("bus", "to", "bus"), ("generator", "to", "bus")],
+            ),
+            input_channels={"bus": 7, "generator": 4},
+            hidden_channels=8,
+            num_layers=1,
+            num_heads=1,
+        )
+
+
+class TestFromPretrained:
+    """Test Modeler.from_pretrained() with mocked HuggingFace + SafeTensors."""
+
+    def test_from_pretrained_downloads_and_loads(
+        self, tmp_path, fake_config, fake_state_dict
+    ):
+        """Verify from_pretrained wires hf_hub_download + load_file + load_model."""
+        from safetensors.torch import save_file
+
+        # Stage real artifacts on disk so the mocked download returns them.
+        config_path = tmp_path / "config.json"
+        weights_path = tmp_path / "model.safetensors"
+        with config_path.open("w") as f:
+            # config_data has tuple keys in metadata.edges; coerce to str.
+            json.dump(
+                {
+                    **fake_config,
+                    "metadata": {
+                        **fake_config["metadata"],
+                        "edges": {
+                            str(k): v
+                            for k, v in fake_config["metadata"]["edges"].items()
+                        },
+                    },
+                },
+                f,
+            )
+        # Ensure all tensors are contiguous (safetensors requirement).
+        save_file(
+            {k: v.contiguous() for k, v in fake_state_dict.items()},
+            str(weights_path),
+        )
+
+        def fake_download(*, repo_id, filename, **kwargs):
+            if filename == "config.json":
+                return str(config_path)
+            if filename == "model.safetensors":
+                return str(weights_path)
+            raise FileNotFoundError(filename)
+
+        with patch(
+            "huggingface_hub.hf_hub_download", side_effect=fake_download
+        ) as mock_dl:
+            modeler = Modeler(torch.device("cpu"), verbose=False)
+            result = modeler.from_pretrained("argonne/LUMINA-2M")
+
+        # Returns self for chaining
+        assert result is modeler
+        # Model was constructed and config_data populated
+        assert modeler.model is not None
+        assert modeler.config_data is not None
+        # Both required files were requested
+        assert mock_dl.call_count == 2
+        called_filenames = {c.kwargs["filename"] for c in mock_dl.call_args_list}
+        assert called_filenames == {"config.json", "model.safetensors"}
+        # repo_id forwarded correctly
+        for call in mock_dl.call_args_list:
+            assert call.kwargs["repo_id"] == "argonne/LUMINA-2M"
+
+    def test_from_pretrained_forwards_revision_and_token(
+        self, tmp_path, fake_config, fake_state_dict
+    ):
+        """revision / token / cache_dir args propagate to hf_hub_download."""
+        from safetensors.torch import save_file
+
+        config_path = tmp_path / "config.json"
+        weights_path = tmp_path / "model.safetensors"
+        with config_path.open("w") as f:
+            json.dump(
+                {
+                    **fake_config,
+                    "metadata": {
+                        **fake_config["metadata"],
+                        "edges": {
+                            str(k): v
+                            for k, v in fake_config["metadata"]["edges"].items()
+                        },
+                    },
+                },
+                f,
+            )
+        save_file(
+            {k: v.contiguous() for k, v in fake_state_dict.items()},
+            str(weights_path),
+        )
+
+        def fake_download(*, repo_id, filename, **kwargs):
+            return str(
+                config_path if filename == "config.json" else weights_path
+            )
+
+        with patch(
+            "huggingface_hub.hf_hub_download", side_effect=fake_download
+        ) as mock_dl:
+            modeler = Modeler(torch.device("cpu"), verbose=False)
+            modeler.from_pretrained(
+                "argonne/LUMINA-2M",
+                revision="v0.1.0",
+                token="hf_FAKE",
+                cache_dir=str(tmp_path / "cache"),
+            )
+
+        for call in mock_dl.call_args_list:
+            assert call.kwargs["revision"] == "v0.1.0"
+            assert call.kwargs["token"] == "hf_FAKE"
+            assert call.kwargs["cache_dir"] == str(tmp_path / "cache")
+
+    def test_from_pretrained_omits_optional_kwargs_when_none(
+        self, tmp_path, fake_config, fake_state_dict
+    ):
+        """When revision/cache_dir are None they should not be forwarded."""
+        from safetensors.torch import save_file
+
+        config_path = tmp_path / "config.json"
+        weights_path = tmp_path / "model.safetensors"
+        with config_path.open("w") as f:
+            json.dump(
+                {
+                    **fake_config,
+                    "metadata": {
+                        **fake_config["metadata"],
+                        "edges": {
+                            str(k): v
+                            for k, v in fake_config["metadata"]["edges"].items()
+                        },
+                    },
+                },
+                f,
+            )
+        save_file(
+            {k: v.contiguous() for k, v in fake_state_dict.items()},
+            str(weights_path),
+        )
+
+        def fake_download(*, repo_id, filename, **kwargs):
+            return str(
+                config_path if filename == "config.json" else weights_path
+            )
+
+        with patch(
+            "huggingface_hub.hf_hub_download", side_effect=fake_download
+        ) as mock_dl:
+            modeler = Modeler(torch.device("cpu"), verbose=False)
+            modeler.from_pretrained("argonne/LUMINA-2M")
+
+        for call in mock_dl.call_args_list:
+            # token is always passed (defaults to None for HF auth lookup)
+            assert "token" in call.kwargs
+            assert call.kwargs["token"] is None
+            # revision and cache_dir omitted entirely when None
+            assert "revision" not in call.kwargs
+            assert "cache_dir" not in call.kwargs
 
 
 # ---------------------------------------------------------------------------
