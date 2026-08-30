@@ -55,7 +55,7 @@ AC_LINE_EDGE_ATTR_DIM = 9
 
 
 def _make_fake_config():
-    """Return a realistic config_data dict matching LUMINA-1B structure."""
+    """Return a realistic config_data dict matching LUMINA-2M structure."""
     return {
         "case_name": "pglib_opf_case14_ieee",
         "metadata": {
