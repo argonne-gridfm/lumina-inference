@@ -26,12 +26,14 @@ permissions and limitations under the License.
 """
 
 import json
+import warnings
 from unittest.mock import MagicMock, patch, mock_open
 
 import pytest
 import torch
 from torch_geometric.data import HeteroData, Batch
 
+from lumina_inference.dataset.validation import SchemaValidationError
 from lumina_inference.modeler import Modeler
 
 
@@ -467,3 +469,474 @@ class TestNoTrainingLeakage:
             assert not hasattr(modeler, method_name), (
                 f"Modeler has forbidden method: {method_name}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Min-max scaling resolution
+# ---------------------------------------------------------------------------
+
+
+class TestMinMaxScalingResolution:
+    """Honour the setting the checkpoint recorded, defaulting to True.
+
+    Training persists its own ``minmax_scaling`` setting, because applying
+    the opposite at inference does not fail -- it silently squashes vm, pg
+    and qg through bounds.
+    """
+
+    @staticmethod
+    def _load(config_data, state_dict, **kwargs):
+        modeler = Modeler(torch.device("cpu"), verbose=False, **kwargs)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            modeler.load_model(config_data, state_dict)
+        return modeler, caught
+
+    def test_absent_key_resolves_to_true_with_a_warning(
+        self, fake_config, fake_state_dict
+    ):
+        config = dict(fake_config)
+        config.pop("minmax_scaling", None)
+        modeler, caught = self._load(config, fake_state_dict)
+
+        assert modeler.minmax_scaling is True
+        assert any("minmax_scaling" in str(w.message) for w in caught)
+
+    def test_recorded_false_is_honoured_without_warning(
+        self, fake_config, fake_state_dict
+    ):
+        config = {**fake_config, "minmax_scaling": False}
+        modeler, caught = self._load(config, fake_state_dict)
+
+        assert modeler.minmax_scaling is False
+        assert not [w for w in caught if "minmax_scaling" in str(w.message)]
+
+    def test_recorded_true_is_honoured(self, fake_config, fake_state_dict):
+        config = {**fake_config, "minmax_scaling": True}
+        modeler, _ = self._load(config, fake_state_dict)
+        assert modeler.minmax_scaling is True
+
+    def test_explicit_caller_value_overrides_the_config(
+        self, fake_config, fake_state_dict
+    ):
+        config = {**fake_config, "minmax_scaling": False}
+        modeler, _ = self._load(config, fake_state_dict)
+
+        assert modeler._minmax(None) is False
+        assert modeler._minmax(True) is True
+
+    def test_contradicting_the_config_warns(self, fake_config, fake_state_dict):
+        config = {**fake_config, "minmax_scaling": False}
+        modeler, _ = self._load(config, fake_state_dict)
+
+        with pytest.warns(UserWarning, match="trained with minmax_scaling=False"):
+            modeler._minmax(True)
+
+    def test_agreeing_with_the_config_does_not_warn(
+        self, fake_config, fake_state_dict
+    ):
+        config = {**fake_config, "minmax_scaling": False}
+        modeler, _ = self._load(config, fake_state_dict)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert modeler._minmax(False) is False
+        assert not [w for w in caught if "minmax_scaling" in str(w.message)]
+
+    def test_resolved_setting_reaches_the_forward_pass(
+        self, fake_config, fake_state_dict
+    ):
+        batch = _make_fake_batch(batch_size=1)
+
+        scaled, _ = self._load(
+            {**fake_config, "minmax_scaling": True}, fake_state_dict
+        )
+        unscaled, _ = self._load(
+            {**fake_config, "minmax_scaling": False}, fake_state_dict
+        )
+
+        vm_scaled = scaled.predict_batch(batch)[0]["bus"][:, 1]
+        vm_unscaled = unscaled.predict_batch(batch)[0]["bus"][:, 1]
+
+        vmin = batch["bus"].x[:, 1]
+        vmax = batch["bus"].x[:, 2]
+        assert ((vm_scaled >= vmin - 1e-5) & (vm_scaled <= vmax + 1e-5)).all()
+        assert not torch.allclose(vm_scaled, vm_unscaled)
+
+
+# ---------------------------------------------------------------------------
+# Batch bookkeeping threaded into forward
+# ---------------------------------------------------------------------------
+
+
+class TestBatchKwargsThreading:
+    """Per-graph aggregation heads need batch_dict and num_graphs."""
+
+    def test_predict_batch_passes_batch_bookkeeping(self, modeler_with_model):
+        modeler, _ = modeler_with_model
+        recorded = {}
+        real_model = modeler.model
+
+        class _Recorder(torch.nn.Module):
+            def forward(self, *args, **kwargs):
+                recorded.update(kwargs)
+                return real_model(*args, **kwargs)
+
+        modeler.model = _Recorder()
+        try:
+            modeler.predict_batch(_make_fake_batch(batch_size=3))
+        finally:
+            modeler.model = real_model
+
+        assert recorded["num_graphs"] == 3
+        assert "bus" in recorded["batch_dict"]
+        assert recorded["batch_dict"]["bus"].tolist().count(0) == NUM_BUSES
+
+    def test_predict_single_reports_one_graph(self, modeler_with_model):
+        modeler, _ = modeler_with_model
+        recorded = {}
+        real_model = modeler.model
+
+        class _Recorder(torch.nn.Module):
+            def forward(self, *args, **kwargs):
+                recorded.update(kwargs)
+                return real_model(*args, **kwargs)
+
+        modeler.model = _Recorder()
+        try:
+            modeler.predict_single(_make_fake_hetero_data(), validate=False)
+        finally:
+            modeler.model = real_model
+
+        assert recorded["num_graphs"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Virtual-node checkpoints
+# ---------------------------------------------------------------------------
+
+
+class TestVirtualNodeServing:
+
+    DEMAND_STATS = ((1.0, 0.1), (0.5, 0.05))
+
+    # Two cases whose demand scales differ, as a real table's would.
+    STATS_TABLE = {
+        "pglib_opf_case14_ieee": [[1.0, 0.1], [0.5, 0.05]],
+        "pglib_opf_case118_ieee": [[40.0, 0.7], [14.0, 0.25]],
+    }
+
+    def _vn_config(self, fake_config, variant_name="allnode_ones", **extra):
+        """The config a virtual-node-trained checkpoint would carry."""
+        from lumina_inference.dataset.virtual_node import (
+            extend_metadata,
+            make_variant,
+        )
+
+        variant = make_variant(
+            variant_name,
+            demand_stats=(
+                self.DEMAND_STATS if variant_name == "allnode_demand" else None
+            ),
+        )
+        metadata = extend_metadata(fake_config["metadata"], variant)
+        config = {
+            **fake_config,
+            "metadata": metadata,
+            "input_channels": dict(metadata["nodes"]),
+            **extra,
+        }
+        return config
+
+    def test_non_virtual_node_config_yields_no_transform(
+        self, modeler_with_model
+    ):
+        modeler, _ = modeler_with_model
+        assert modeler.virtual_node_transform is None
+
+    def test_virtual_node_config_is_detected(self, fake_config):
+        config = self._vn_config(fake_config)
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        variant = modeler.virtual_node_transform
+        assert variant is not None
+        assert variant.virtual_node_type == "grid"
+
+    def test_predict_single_augments_automatically(self, fake_config):
+        """Callers keep passing plain OPF graphs."""
+        config = self._vn_config(fake_config)
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        data = _make_fake_hetero_data()
+        predictions = modeler.predict_single(data)
+
+        assert "bus" in predictions and "generator" in predictions
+        # The caller's graph is left untouched.
+        assert "grid" not in data.node_types
+
+    def test_predict_batch_explains_how_to_augment(self, fake_config):
+        """A collated batch cannot be augmented after the fact."""
+        config = self._vn_config(fake_config)
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        with pytest.raises(SchemaValidationError, match="virtual_node_transform"):
+            modeler.predict_batch(_make_fake_batch(batch_size=2))
+
+    def test_pre_augmented_batch_predicts(self, fake_config):
+        """Applying the transform per sample, as a dataset would, works."""
+        config = self._vn_config(fake_config)
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        transform = modeler.virtual_node_transform
+        batch = Batch.from_data_list(
+            [transform(_make_fake_hetero_data()) for _ in range(2)]
+        )
+        predictions, _ = modeler.predict_batch(batch)
+        assert "bus" in predictions
+
+    def test_demand_node_without_stats_is_refused_at_load(self, fake_config):
+        """Silently zeroed demand channels would degrade predictions."""
+        config = self._vn_config(fake_config, "allnode_demand")
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        with pytest.raises(ValueError, match="demand_stats"):
+            modeler.load_model(config, {})
+
+    def test_demand_stats_supplied_at_construction(self, fake_config):
+        config = self._vn_config(fake_config, "allnode_demand")
+
+        modeler = Modeler(
+            torch.device("cpu"), verbose=False, demand_stats=self.DEMAND_STATS
+        )
+        modeler.load_model(config, {})
+        assert modeler.virtual_node_transform.virtual_node_dim == 4
+        assert modeler.demand_stats_in_use == self.DEMAND_STATS
+
+    def test_augmentation_can_be_disabled(self, fake_config):
+        config = self._vn_config(fake_config)
+        modeler = Modeler(
+            torch.device("cpu"), verbose=False, virtual_node=False
+        )
+        modeler.load_model(config, {})
+        assert modeler.virtual_node_transform is None
+
+
+class TestDemandStatsFromConfig:
+    """The checkpoint config carries the statistics, so serving needs no ceremony."""
+
+    DEMAND_STATS = TestVirtualNodeServing.DEMAND_STATS
+    STATS_TABLE = TestVirtualNodeServing.STATS_TABLE
+    _vn_config = TestVirtualNodeServing._vn_config
+
+    def _demand_config(self, fake_config, **extra):
+        """A width-4 virtual-node config, as a checkpoint carries it."""
+        return self._vn_config(fake_config, "allnode_demand", **extra)
+
+    def test_config_table_and_case_name_need_no_caller_argument(
+        self, fake_config
+    ):
+        """The path an external Hugging Face user takes."""
+        config = self._demand_config(
+            fake_config,
+            virtual_node={
+                "enabled": True,
+                "variant": "allnode_demand",
+                "demand_stats": self.STATS_TABLE,
+            },
+            case_name="pglib_opf_case118_ieee",
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        assert modeler.demand_stats_in_use == ((40.0, 0.7), (14.0, 0.25))
+        assert modeler.virtual_node_transform.virtual_node_dim == 4
+
+    def test_single_case_table_needs_no_case_name(self, fake_config):
+        """A single-case checkpoint is unambiguous, so no name is required."""
+        config = self._demand_config(
+            fake_config,
+            virtual_node={
+                "demand_stats": {
+                    "pglib_opf_case118_ieee": [[40.0, 0.7], [14.0, 0.25]]
+                }
+            },
+            case_name=None,
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use == ((40.0, 0.7), (14.0, 0.25))
+
+    def test_multi_case_table_without_a_case_name_is_refused(self, fake_config):
+        """Picking the wrong row is worse than refusing to pick."""
+        config = self._demand_config(
+            fake_config,
+            virtual_node={"demand_stats": self.STATS_TABLE},
+            case_name=None,
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        with pytest.raises(ValueError, match="case_name"):
+            modeler.load_model(config, {})
+
+    def test_unknown_case_name_lists_the_known_ones(self, fake_config):
+        config = self._demand_config(
+            fake_config, virtual_node={"demand_stats": self.STATS_TABLE}
+        )
+
+        modeler = Modeler(
+            torch.device("cpu"), verbose=False, case_name="pglib_opf_case30_ieee"
+        )
+        with pytest.raises(ValueError, match="pglib_opf_case118_ieee"):
+            modeler.load_model(config, {})
+
+    def test_case_name_argument_overrides_the_config(self, fake_config):
+        config = self._demand_config(
+            fake_config,
+            virtual_node={"demand_stats": self.STATS_TABLE},
+            case_name="pglib_opf_case14_ieee",
+        )
+
+        modeler = Modeler(
+            torch.device("cpu"), verbose=False, case_name="pglib_opf_case118_ieee"
+        )
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use == ((40.0, 0.7), (14.0, 0.25))
+
+    def test_resolved_pair_overrides_the_table_outright(self, fake_config):
+        """An explicit pair wins without any case lookup at all."""
+        config = self._demand_config(
+            fake_config, virtual_node={"demand_stats": self.STATS_TABLE}
+        )
+
+        modeler = Modeler(
+            torch.device("cpu"),
+            verbose=False,
+            demand_stats=((7.0, 0.7), (3.0, 0.3)),
+        )
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use == ((7.0, 0.7), (3.0, 0.3))
+
+    def test_caller_table_is_merged_over_the_config(self, fake_config):
+        """A caller's own per-case table wins row by row."""
+        config = self._demand_config(
+            fake_config,
+            virtual_node={"demand_stats": self.STATS_TABLE},
+            case_name="pglib_opf_case14_ieee",
+        )
+
+        modeler = Modeler(
+            torch.device("cpu"),
+            verbose=False,
+            demand_stats={"pglib_opf_case14_ieee": [[9.0, 0.9], [4.0, 0.4]]},
+        )
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use == ((9.0, 0.9), (4.0, 0.4))
+
+    def test_json_round_trip_resolves(self, fake_config):
+        """JSON turns every tuple into a list; that is what a user loads."""
+        config = self._demand_config(
+            fake_config,
+            virtual_node={
+                "enabled": True,
+                "demand_stats": self.STATS_TABLE,
+            },
+            case_name="pglib_opf_case14_ieee",
+        )
+        # A published config.json stringifies the tuple edge keys JSON cannot
+        # encode; load_model parses them back.
+        config["metadata"] = {
+            **config["metadata"],
+            "edges": {
+                str(k): v for k, v in config["metadata"]["edges"].items()
+            },
+        }
+        config = json.loads(json.dumps(config, default=str))
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use == ((1.0, 0.1), (0.5, 0.05))
+
+    def test_table_is_ignored_for_a_constant_virtual_node(self, fake_config):
+        """A width-1 grid node needs no statistics and must not change variant."""
+        config = self._vn_config(
+            fake_config,
+            "allnode_ones",
+            virtual_node={"demand_stats": self.STATS_TABLE},
+            case_name="pglib_opf_case14_ieee",
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        assert modeler.virtual_node_transform.name == "allnode_ones"
+        assert modeler.virtual_node_transform.virtual_node_dim == 1
+        assert modeler.demand_stats_in_use is None
+
+    def test_an_unneeded_table_is_never_looked_up(self, fake_config):
+        """A run keeps its demand_stats table whatever variant it used.
+
+        An ``allnode_ones`` checkpoint consumes none of it, so an ambiguous
+        multi-case table must not make it unloadable.
+        """
+        config = self._vn_config(
+            fake_config,
+            "allnode_ones",
+            virtual_node={"enabled": True, "demand_stats": self.STATS_TABLE},
+            case_name=None,
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+        assert modeler.demand_stats_in_use is None
+
+    def test_a_table_on_a_plain_checkpoint_changes_nothing(self, fake_config):
+        """No virtual node at all: nothing resolves and nothing raises."""
+        config = {
+            **fake_config,
+            "virtual_node": {"demand_stats": self.STATS_TABLE},
+            "case_name": None,
+        }
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        assert modeler.virtual_node_transform is None
+        assert modeler.demand_stats_in_use is None
+        predictions = modeler.predict_single(_make_fake_hetero_data())
+        assert "bus" in predictions and "generator" in predictions
+
+    def test_standardised_channels_use_the_resolved_statistics(
+        self, fake_config
+    ):
+        config = self._demand_config(
+            fake_config,
+            virtual_node={"demand_stats": self.STATS_TABLE},
+            case_name="pglib_opf_case14_ieee",
+        )
+
+        modeler = Modeler(torch.device("cpu"), verbose=False)
+        modeler.load_model(config, {})
+
+        data = _make_fake_hetero_data()
+        augmented = modeler.virtual_node_transform(data)
+
+        (p_mean, p_std), (q_mean, q_std) = ((1.0, 0.1), (0.5, 0.05))
+        pd_tot = float(data["load"].x[:, 0].sum())
+        qd_tot = float(data["load"].x[:, 1].sum())
+        grid_x = augmented["grid"].x[0]
+
+        assert grid_x[0].item() == pytest.approx((pd_tot - p_mean) / p_std)
+        assert grid_x[1].item() == pytest.approx((qd_tot - q_mean) / q_std)
+
+    def test_a_bad_demand_stats_shape_is_rejected(self, fake_config):
+        config = self._demand_config(fake_config)
+
+        modeler = Modeler(torch.device("cpu"), verbose=False, demand_stats=1.0)
+        with pytest.raises(ValueError, match="demand_stats must be"):
+            modeler.load_model(config, {})
