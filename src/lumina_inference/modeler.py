@@ -17,17 +17,25 @@ permissions and limitations under the License.
 
 import ast
 import re
+import warnings
+from collections.abc import Mapping, Sequence
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
 from torch_geometric.data import HeteroData
 from tqdm import tqdm
 
+from lumina_inference.dataset.utils import hetero_batch_kwargs
 from lumina_inference.dataset.validation import (
     MissingDataError,
     SchemaValidationError,
     detect_schema,
     validate_hetero_data,
+)
+from lumina_inference.dataset.virtual_node import (
+    needs_demand_stats,
+    select_demand_stats,
+    variant_from_metadata,
 )
 from lumina_inference.model.hetero_model import HGT
 
@@ -45,6 +53,72 @@ def _safe_edge_attr_dict(batch):
         return None
 
 
+def _is_stats_pair(value) -> bool:
+    """Whether a ``demand_stats`` argument is one case's resolved statistics.
+
+    ``Modeler`` accepts ``demand_stats`` in two shapes — one case's resolved
+    ``((p_mean, p_std), (q_mean, q_std))``, or a per-case table keyed by case
+    name — and treats them very differently, so the two must never be
+    confused. A table is a mapping; a resolved pair is two pairs of numbers.
+
+    Args:
+        value: The ``demand_stats`` argument as supplied by the caller.
+
+    Returns:
+        bool: True for a resolved pair, False for a mapping, ``None``, or
+        anything else (which the table path then rejects with its own error).
+    """
+    if isinstance(value, Mapping) or isinstance(value, (str, bytes)):
+        return False
+    if not isinstance(value, Sequence) or len(value) != 2:
+        return False
+    return all(
+        isinstance(half, Sequence)
+        and not isinstance(half, (str, bytes))
+        and len(half) == 2
+        and all(isinstance(n, (int, float)) and not isinstance(n, bool) for n in half)
+        for half in value
+    )
+
+
+def _resolve_minmax_scaling(config_data, requested: Optional[bool]) -> bool:
+    """Decide whether to min-max scale outputs, preferring the checkpoint's setting.
+
+    Training records its own ``minmax_scaling`` setting under that key, so a
+    checkpoint can say how its weights were trained.
+
+    Args:
+        config_data (dict): Parsed model configuration.
+        requested (Optional[bool]): The caller's explicit choice, or None to
+            defer to the checkpoint.
+
+    Returns:
+        bool: The setting to pass to the model's forward pass.
+    """
+    recorded = (config_data or {}).get("minmax_scaling")
+
+    if requested is None:
+        if recorded is None:
+            warnings.warn(
+                "Config does not record 'minmax_scaling', so inference assumes "
+                "True (the training default). If these weights were trained "
+                "without min-max scaling, pass minmax_scaling=False — otherwise "
+                "vm, pg and qg are squashed into bounds the weights never saw.",
+                stacklevel=3,
+            )
+            return True
+        return bool(recorded)
+
+    if recorded is not None and bool(recorded) != bool(requested):
+        warnings.warn(
+            f"Checkpoint was trained with minmax_scaling={bool(recorded)} but "
+            f"inference is running with {bool(requested)}. Pass "
+            f"minmax_scaling={bool(recorded)} to match the training run.",
+            stacklevel=3,
+        )
+    return bool(requested)
+
+
 class Modeler:
     """Prediction-only wrapper for OPF model loading and inference.
 
@@ -57,6 +131,21 @@ class Modeler:
             keys are missing during checkpoint load. Defaults to False.
         verbose (bool, optional): If True, print diagnostic messages during
             checkpoint loading. Defaults to True.
+        demand_stats (optional): Overrides the statistics the checkpoint
+            carries, in either of two shapes — one case's resolved
+            ``((p_mean, p_std), (q_mean, q_std))``, which is used as-is, or a
+            ``{case_name: [[p_mean, p_std], [q_mean, q_std]]}`` table, whose
+            rows are merged over the checkpoint's own. Needed only to supply
+            statistics for a case the config does not record, or to substitute
+            your own. See
+            :func:`~lumina_inference.dataset.virtual_node.compute_demand_stats`.
+        case_name (optional): Which case's row to take from a multi-case
+            table. Defaults to the config's own ``case_name``, and is
+            unnecessary for a table holding a single case.
+        virtual_node (bool, optional): If True, reconstruct the virtual-node
+            augmentation from the loaded metadata and apply it to incoming
+            graphs. Defaults to True; it is a no-op for checkpoints trained
+            without a virtual node.
 
     Attributes:
         device (torch.device): See Args.
@@ -66,6 +155,11 @@ class Modeler:
             ``load_model`` is called).
         config_data (Optional[dict]): Parsed model configuration loaded
             during ``load_model``.
+        minmax_scaling (Optional[bool]): The setting resolved from the config
+            during ``load_model``, used whenever a caller does not pass one.
+        demand_stats_in_use (Optional[tuple]): The resolved
+            ``((p_mean, p_std), (q_mean, q_std))`` actually applied to the
+            virtual node, or None when the checkpoint needs none.
 
     Example:
         >>> modeler = Modeler(torch.device("cpu"))
@@ -82,12 +176,21 @@ class Modeler:
         *,
         fail_on_missing: bool = False,
         verbose: bool = True,
+        demand_stats=None,
+        case_name: Optional[str] = None,
+        virtual_node: bool = True,
     ):
         self.device = device
         self.fail_on_missing = fail_on_missing
         self.verbose = verbose
+        self.demand_stats = demand_stats
+        self.case_name = case_name
+        self.virtual_node = virtual_node
         self.model: Optional[torch.nn.Module] = None
         self.config_data = None
+        self.minmax_scaling: Optional[bool] = None
+        self.demand_stats_in_use = None
+        self._vn_variant = None
 
     # -- checkpoint key conversion and loading --------------------------------
 
@@ -214,14 +317,19 @@ class Modeler:
             raise KeyError(
                 "config['models'] must contain an 'HGT' or 'HeteroGNN' key"
             )
-        model = HGT(
+        # Splat the whole architecture config, as training does, so that a
+        # checkpoint's hyperparameters reach the constructor whether or not
+        # this file knows their names. HGT absorbs unknown keys via **kwargs.
+        model_kwargs = dict(hgt_cfg)
+        model_kwargs.update(
             metadata=config_data["metadata"],
             input_channels=config_data["input_channels"],
-            hidden_channels=hgt_cfg["hidden_channels"],
-            num_layers=hgt_cfg["num_layers"],
-            num_heads=hgt_cfg.get("num_heads", 1),
-            dropout=hgt_cfg.get("dropout", 0.0),
-        ).to(self.device)
+            out_channels=config_data.get("out_channels", 2),
+        )
+        model_kwargs.setdefault("hidden_channels", 64)
+        model_kwargs.setdefault("num_layers", 3)
+        model_kwargs.setdefault("num_heads", 1)
+        model = HGT(**model_kwargs).to(self.device)
 
         # state_dict is the raw output of safetensors.load_file; remap keys
         checkpoint_dict = {
@@ -239,7 +347,119 @@ class Modeler:
         model.eval()
         self.model = model
         self.config_data = config_data
+
+        # Resolve once, so the "assuming True" warning fires at load time
+        # rather than on every batch.
+        self.minmax_scaling = _resolve_minmax_scaling(config_data, None)
+
+        # Resolve only when the virtual node actually standardises demand. A
+        # run's config keeps its demand_stats table whatever variant it used,
+        # so a width-1 'grid' node must not be held to a lookup -- let alone an
+        # ambiguous one -- for statistics it never consumes.
+        stats = None
+        if self.virtual_node and needs_demand_stats(config_data["metadata"]):
+            stats = self._resolve_demand_stats(config_data)
+            if stats is None:
+                raise ValueError(
+                    "this checkpoint expects a virtual node carrying "
+                    "standardised demand, but no demand statistics are "
+                    "available for it. A checkpoint normally records them per "
+                    "case under config['virtual_node']['demand_stats']; this "
+                    "config carries none, so pass "
+                    "demand_stats=((p_mean, p_std), (q_mean, q_std)) for the "
+                    "case being served, e.g. from "
+                    "compute_demand_stats(samples). Without them the "
+                    "standardised channels would be constant zero, so the "
+                    "virtual node would not carry the demand signal the "
+                    "weights expect."
+                )
+        self.demand_stats_in_use = stats
+
+        self._vn_variant = (
+            variant_from_metadata(config_data["metadata"], stats)
+            if self.virtual_node
+            else None
+        )
+        if self.verbose and self._vn_variant is not None:
+            print(
+                f"[MODEL LOAD] Checkpoint expects a virtual node; input graphs "
+                f"will be augmented with {self._vn_variant!r}"
+            )
+            if stats is not None:
+                (p_mean, p_std), (q_mean, q_std) = stats
+                source = (
+                    "caller-supplied statistics"
+                    if self.demand_stats is not None
+                    else "statistics from the checkpoint config"
+                )
+                case = self.case_name or config_data.get("case_name")
+                print(
+                    f"[MODEL LOAD] Standardising total demand against "
+                    f"{source}"
+                    + (f" for {case}" if case else "")
+                    + f": Pd ~ ({p_mean:.6g}, {p_std:.6g}), "
+                    f"Qd ~ ({q_mean:.6g}, {q_std:.6g})"
+                )
+
         return model, config_data
+
+    def _resolve_demand_stats(self, config_data: dict):
+        """Resolve the demand statistics to standardise the virtual node with.
+
+        A checkpoint records them per case under
+        ``config['virtual_node']['demand_stats']``, because total demand scales
+        with the network. The caller's ``demand_stats`` overrides that —
+        outright when it is one case's resolved pair, or row by row when it is
+        a table of its own.
+
+        Args:
+            config_data (dict): Parsed model configuration.
+
+        Returns:
+            Optional[tuple]: ``((p_mean, p_std), (q_mean, q_std))``, or None
+            when neither the caller nor the config supplies any.
+
+        Raises:
+            ValueError: If a case has to be chosen and cannot be — see
+                :func:`~lumina_inference.dataset.virtual_node.select_demand_stats`.
+        """
+        override = self.demand_stats
+        if _is_stats_pair(override):
+            (p_mean, p_std), (q_mean, q_std) = override
+            return ((float(p_mean), float(p_std)), (float(q_mean), float(q_std)))
+
+        virtual_node_cfg = config_data.get("virtual_node") or {}
+        table = dict(virtual_node_cfg.get("demand_stats") or {})
+        if isinstance(override, Mapping):
+            table.update(override)
+        elif override is not None:
+            raise ValueError(
+                f"demand_stats must be either one case's ((p_mean, p_std), "
+                f"(q_mean, q_std)) or a {{case_name: [[p_mean, p_std], "
+                f"[q_mean, q_std]]}} table, got {type(override).__name__}"
+            )
+
+        return select_demand_stats(
+            table, self.case_name or config_data.get("case_name")
+        )
+
+    @property
+    def virtual_node_transform(self):
+        """The augmentation this checkpoint's graphs need, if any.
+
+        ``predict_single`` applies this automatically. The batched pipeline
+        collates before prediction, while the star edges have to be built
+        per-sample, so pass this to the dataset instead::
+
+            dataset = OPFDataset(root, case_name,
+                                 transform=modeler.virtual_node_transform)
+
+        Returns:
+            Optional[Variant]: A callable taking and returning a
+            ``HeteroData``, or ``None`` for a checkpoint trained without a
+            virtual node.
+        """
+        return self._vn_variant
 
     # -- helpers for tensors --------------------------------------------------
 
@@ -271,13 +491,15 @@ class Modeler:
 
     # -- prediction -----------------------------------------------------------
 
-    def predict_batch(self, batch, minmax_scaling: bool = True):
+    def predict_batch(self, batch, minmax_scaling: Optional[bool] = None):
         """Run a forward pass on a single batch.
 
         Args:
             batch: Batched data object containing inputs for the model.
-            minmax_scaling (bool, optional): Whether to apply min-max
-                scaling in the model's forward pass.
+            minmax_scaling (Optional[bool], optional): Whether to apply
+                min-max scaling in the model's forward pass. Defaults to
+                None, meaning use the setting recorded in the config, which
+                is True when the config does not record one.
 
         Returns:
             Tuple[dict, object]: A tuple ``(predictions_cpu, batch_cpu)``
@@ -287,17 +509,21 @@ class Modeler:
         Raises:
             RuntimeError: If the model has not been loaded via
                 ``load_model()``.
+            SchemaValidationError: If the model expects a virtual node that
+                the batch does not carry.
         """
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
+        self._require_virtual_node(batch)
         batch = self.to_float32(batch).to(self.device)
 
         predictions = self.model(
             batch.x_dict,
             batch.edge_index_dict,
             _safe_edge_attr_dict(batch),
-            minmax_scaling=minmax_scaling,
+            minmax_scaling=self._minmax(minmax_scaling),
+            **hetero_batch_kwargs(batch),
         )
 
         # Move predictions to CPU and detach
@@ -315,7 +541,7 @@ class Modeler:
         self,
         loader: Iterable,
         max_batches: Optional[int] = None,
-        minmax_scaling: bool = True,
+        minmax_scaling: Optional[bool] = None,
     ):
         """Run predictions over a data loader.
 
@@ -326,8 +552,9 @@ class Modeler:
             loader (Iterable): Iterable data loader yielding batches.
             max_batches (Optional[int], optional): Limit on number of
                 batches to process. Defaults to None (process all).
-            minmax_scaling (bool, optional): Passed to ``predict_batch``.
-                Defaults to True.
+            minmax_scaling (Optional[bool], optional): Passed to
+                ``predict_batch``. Defaults to None (use the config's
+                setting).
 
         Returns:
             List[Tuple[dict, object]]: List of
@@ -372,7 +599,7 @@ class Modeler:
     def predict_single(
         self,
         data: HeteroData,
-        minmax_scaling: bool = True,
+        minmax_scaling: Optional[bool] = None,
         validate: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """Run inference on a single HeteroData object.
@@ -384,8 +611,10 @@ class Modeler:
 
         Args:
             data (HeteroData): A single heterogeneous graph data object.
-            minmax_scaling (bool, optional): Whether to apply min-max
-                scaling in the model's forward pass. Defaults to True.
+            minmax_scaling (Optional[bool], optional): Whether to apply
+                min-max scaling in the model's forward pass. Defaults to
+                None, meaning use the setting recorded in the config, which
+                is True when the config does not record one.
             validate (bool, optional): Whether to validate the data
                 against the loaded model's schema before prediction.
                 Defaults to True.
@@ -407,6 +636,12 @@ class Modeler:
         if self.model is None:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
+        # Augment before validating: the model's metadata requires the virtual
+        # node, so validation would otherwise reject un-augmented input. The
+        # transform shallow-copies, so the caller's graph is left untouched.
+        if self._vn_variant is not None:
+            data = self._vn_variant(data)
+
         if validate:
             self._validate_batch(data)
 
@@ -419,6 +654,46 @@ class Modeler:
         return predictions_cpu
 
     # -- validation -----------------------------------------------------------
+
+    def _minmax(self, requested: Optional[bool]) -> bool:
+        """Resolve the min-max setting for one prediction call.
+
+        Args:
+            requested (Optional[bool]): The caller's explicit choice, or None
+                to use the setting resolved at load time.
+
+        Returns:
+            bool: The setting to pass to the model's forward pass.
+        """
+        if requested is None:
+            # Already resolved (and warned about) in load_model.
+            return bool(self.minmax_scaling)
+        return _resolve_minmax_scaling(self.config_data, requested)
+
+    def _require_virtual_node(self, batch) -> None:
+        """Fail clearly when a virtual-node model is fed un-augmented data.
+
+        Args:
+            batch: The batch about to be predicted on.
+
+        Raises:
+            SchemaValidationError: If the model expects a virtual node that
+                the batch does not carry.
+        """
+        if self._vn_variant is None:
+            return
+        node_type = self._vn_variant.virtual_node_type
+        if node_type in batch.node_types:
+            return
+        raise SchemaValidationError(
+            f"This checkpoint was trained with a {node_type!r} virtual node, "
+            f"but the batch has none. Batches are collated before prediction "
+            f"while the virtual node must be added per-sample, so apply the "
+            f"augmentation in the dataset: "
+            f"OPFDataset(..., transform=modeler.virtual_node_transform).",
+            expected=f"node type {node_type!r}",
+            actual=str(sorted(batch.node_types)),
+        )
 
     def _validate_batch(self, data: HeteroData) -> None:
         """Validate a HeteroData object against the loaded model's schema.
