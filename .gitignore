@@ -56,6 +56,10 @@ opf_data/
 *.pth
 model-cache/
 
+# The offline test fixtures are small checked-in reference values, not model
+# artifacts, so they are exempt from the rules above.
+!tests/fixtures/*.safetensors
+
 # --- HuggingFace cache ---
 .cache/
 
