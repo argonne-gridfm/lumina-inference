@@ -57,17 +57,24 @@ safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="model.
 with open(config_path, "r") as f:
     config_data = json.load(f)
 
-# Set up device and modeler
+# Set up device and modeler. Name the case being served: a checkpoint that
+# carries demand statistics for several cases cannot guess which to apply.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-modeler = Modeler(device)
+case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
+modeler = Modeler(device, case_name=case_name)
 
 # Load model
 state_dict = load_file(safetensors_path)
 modeler.load_model(config_data, state_dict)
 
-# Load dataset and create loader
-case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
-dataset = OPFDataset(root="./opf_data", case_name=case_name)
+# Load dataset and create loader. virtual_node_transform is None for a plain
+# checkpoint and the per-sample graph augmentation for a virtual-node one,
+# which has to be applied before the loader collates.
+dataset = OPFDataset(
+    root="./opf_data",
+    case_name=case_name,
+    transform=modeler.virtual_node_transform,
+)
 loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
 # Run predictions
@@ -232,13 +239,22 @@ Some checkpoints are trained on an augmented graph: one global `grid` node
 wired to every other node type, plus reverse counterparts for the branch
 relations. `Modeler` reconstructs that augmentation from the checkpoint's own
 metadata and reads its demand statistics from the config, so serving one takes
-no extra arguments:
+no extra arguments — unless the config carries statistics for more than one
+case, in which case name the case being served:
 
 ```python
+# config.json names a single case, or carries a one-row table
 modeler = Modeler(device)
+
+# config.json carries several cases: say which one
+modeler = Modeler(device, case_name="pglib_opf_case14_ieee")
+
 modeler.load_model(config_data, state_dict)
 predictions = modeler.predict_single(load_from_json_file("case.json"))
 ```
+
+A multi-case checkpoint loaded without a `case_name` raises on load, listing
+the cases it knows, rather than quietly applying the wrong network's scale.
 
 Batches are collated before prediction while the virtual node has to be added
 per sample, so for the dataset pipeline pass the transform to the dataset:
