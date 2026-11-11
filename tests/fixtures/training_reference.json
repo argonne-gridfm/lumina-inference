@@ -1,0 +1,269 @@
+{
+  "description": "Reference values produced by the training implementation's own virtual-node transform and forward pass, for the demand-carrying virtual-node variant. The demand statistics are synthetic.",
+  "opf_dict": {
+    "grid": {
+      "context": [
+        [
+          [
+            100.0
+          ]
+        ]
+      ],
+      "nodes": {
+        "bus": [
+          [
+            69.0,
+            3,
+            0.94,
+            1.06
+          ],
+          [
+            69.0,
+            2,
+            0.94,
+            1.06
+          ],
+          [
+            69.0,
+            1,
+            0.94,
+            1.06
+          ],
+          [
+            69.0,
+            1,
+            0.94,
+            1.06
+          ]
+        ],
+        "generator": [
+          [
+            100.0,
+            2.324,
+            0.0,
+            3.324,
+            0.0,
+            -0.1,
+            0.1,
+            1.06,
+            0.043,
+            20.0,
+            0.0
+          ],
+          [
+            100.0,
+            0.4,
+            0.0,
+            1.4,
+            0.0,
+            -0.4,
+            0.5,
+            1.045,
+            0.25,
+            20.0,
+            0.0
+          ]
+        ],
+        "load": [
+          [
+            0.217,
+            0.127
+          ],
+          [
+            0.942,
+            0.19
+          ],
+          [
+            0.478,
+            -0.039
+          ]
+        ],
+        "shunt": [
+          [
+            0.19,
+            0.0
+          ]
+        ]
+      },
+      "edges": {
+        "ac_line": {
+          "senders": [
+            0,
+            1,
+            1,
+            2
+          ],
+          "receivers": [
+            1,
+            2,
+            3,
+            3
+          ],
+          "features": [
+            [
+              -0.52,
+              0.52,
+              0.026,
+              0.026,
+              0.019,
+              0.059,
+              4.72,
+              4.72,
+              4.72
+            ],
+            [
+              -0.52,
+              0.52,
+              0.022,
+              0.022,
+              0.054,
+              0.223,
+              1.28,
+              1.28,
+              1.28
+            ],
+            [
+              -0.52,
+              0.52,
+              0.017,
+              0.017,
+              0.047,
+              0.198,
+              1.28,
+              1.28,
+              1.28
+            ],
+            [
+              -0.52,
+              0.52,
+              0.013,
+              0.013,
+              0.067,
+              0.171,
+              0.65,
+              0.65,
+              0.65
+            ]
+          ]
+        },
+        "transformer": {
+          "senders": [
+            0
+          ],
+          "receivers": [
+            3
+          ],
+          "features": [
+            [
+              -0.52,
+              0.52,
+              0.0,
+              0.209,
+              0.978,
+              0.978,
+              0.978,
+              0.969,
+              0.0,
+              0.0,
+              0.0
+            ]
+          ]
+        },
+        "generator_link": {
+          "senders": [
+            0,
+            1
+          ],
+          "receivers": [
+            0,
+            1
+          ]
+        },
+        "load_link": {
+          "senders": [
+            0,
+            1,
+            2
+          ],
+          "receivers": [
+            1,
+            2,
+            3
+          ]
+        },
+        "shunt_link": {
+          "senders": [
+            0
+          ],
+          "receivers": [
+            3
+          ]
+        }
+      }
+    },
+    "metadata": {
+      "objective": 0.0
+    }
+  },
+  "demand_stats": [
+    [
+      3.0,
+      0.25
+    ],
+    [
+      1.0,
+      0.05
+    ]
+  ],
+  "node_types": [
+    "bus",
+    "generator",
+    "load",
+    "shunt",
+    "grid"
+  ],
+  "edge_types": [
+    "bus|ac_line|bus",
+    "bus|transformer|bus",
+    "generator|generator_link|bus",
+    "bus|generator_link|generator",
+    "load|load_link|bus",
+    "bus|load_link|load",
+    "shunt|shunt_link|bus",
+    "bus|shunt_link|shunt",
+    "bus|ac_line_rev|bus",
+    "bus|transformer_rev|bus",
+    "bus|to_grid|grid",
+    "grid|from_grid|bus",
+    "generator|to_grid|grid",
+    "grid|from_grid|generator",
+    "load|to_grid|grid",
+    "grid|from_grid|load",
+    "shunt|to_grid|grid",
+    "grid|from_grid|shunt"
+  ],
+  "input_channels": {
+    "bus": 7,
+    "generator": 11,
+    "load": 2,
+    "shunt": 2,
+    "grid": 4
+  },
+  "hyperparameters": {
+    "hidden_channels": 8,
+    "num_layers": 1,
+    "num_heads": 1,
+    "out_channels": 2
+  },
+  "expected_scalars": {
+    "sum_pg.sr0_mm0": 2.0024569034576416,
+    "sum_pg.sr0_mm1": 3.4654040336608887,
+    "sum_pg.sr1_mm0": 1.7352197170257568,
+    "sum_pg.sr1_mm1": 1.7352197170257568
+  },
+  "provenance": {
+    "training_commit": "8bfd51e7b8dc42f5de22e769fb56f21a24399e9e",
+    "torch": "2.0.1",
+    "torch_geometric": "2.6.1"
+  }
+}

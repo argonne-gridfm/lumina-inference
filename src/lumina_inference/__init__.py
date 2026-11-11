@@ -29,6 +29,13 @@ from lumina_inference.dataset.ingestion import (
     process_opf_dict,
 )
 from lumina_inference.dataset.opf_dataset import process_json_file
+from lumina_inference.dataset.virtual_node import (
+    compute_demand_stats,
+    make_variant,
+    needs_demand_stats,
+    select_demand_stats,
+    variant_from_metadata,
+)
 from lumina_inference.modeler import Modeler
 
 __all__ = [
@@ -42,4 +49,10 @@ __all__ = [
     "load_from_matpower",
     "process_json_file",
     "process_opf_dict",
+    # Virtual-node augmentation
+    "compute_demand_stats",
+    "make_variant",
+    "needs_demand_stats",
+    "select_demand_stats",
+    "variant_from_metadata",
 ]

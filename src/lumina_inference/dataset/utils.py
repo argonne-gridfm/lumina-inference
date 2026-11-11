@@ -1,6 +1,7 @@
 """Utility functions for processing OPF datasets.
 
-Edge index helpers used during HeteroData construction.
+Edge index helpers used during HeteroData construction, plus batch
+bookkeeping needed by model heads that aggregate per graph.
 
 Copyright 2026 UChicago Argonne, LLC.
 
@@ -62,3 +63,25 @@ def extract_edge_index_rev(obj: Dict, edge_name: str) -> Tensor:
             ]
         )
     )
+
+
+def hetero_batch_kwargs(data) -> Dict:
+    """Batch bookkeeping for feature aggregation.
+
+    Args:
+        data: A ``HeteroData`` object or a collated batch of them.
+
+    Returns:
+        Dict: ``{"batch_dict": {node_type: tensor}, "num_graphs": int}``,
+        suitable for splatting into a model's ``forward``.
+    """
+    try:
+        return {"batch_dict": data.batch_dict, "num_graphs": int(data.num_graphs)}
+    except (AttributeError, KeyError):  # an unbatched HeteroData is a single graph
+        return {
+            "batch_dict": {
+                node_type: torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+                for node_type, x in data.x_dict.items()
+            },
+            "num_graphs": 1,
+        }

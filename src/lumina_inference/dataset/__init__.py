@@ -24,6 +24,18 @@ from lumina_inference.dataset.ingestion import (
     process_opf_dict,
 )
 from lumina_inference.dataset.opf_dataset import OPFDataset, process_json_file
+from lumina_inference.dataset.utils import hetero_batch_kwargs
+from lumina_inference.dataset.virtual_node import (
+    AddHeteroVirtualNode,
+    AddReverseGridEdges,
+    Variant,
+    compute_demand_stats,
+    extend_metadata,
+    make_variant,
+    needs_demand_stats,
+    select_demand_stats,
+    variant_from_metadata,
+)
 from lumina_inference.dataset.validation import (
     FeatureDimensionError,
     LuminaIngestionError,
@@ -45,6 +57,17 @@ __all__ = [
     "load_from_matpower",
     "process_json_file",
     "process_opf_dict",
+    "hetero_batch_kwargs",
+    # Virtual-node augmentation
+    "AddHeteroVirtualNode",
+    "AddReverseGridEdges",
+    "Variant",
+    "compute_demand_stats",
+    "extend_metadata",
+    "make_variant",
+    "needs_demand_stats",
+    "select_demand_stats",
+    "variant_from_metadata",
     # Validation
     "detect_schema",
     "validate_hetero_data",

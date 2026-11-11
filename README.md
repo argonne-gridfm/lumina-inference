@@ -57,17 +57,24 @@ safetensors_path = hf_hub_download(repo_id="argonne/LUMINA-2M", filename="model.
 with open(config_path, "r") as f:
     config_data = json.load(f)
 
-# Set up device and modeler
+# Set up device and modeler. Name the case being served: a checkpoint that
+# carries demand statistics for several cases cannot guess which to apply.
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-modeler = Modeler(device)
+case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
+modeler = Modeler(device, case_name=case_name)
 
 # Load model
 state_dict = load_file(safetensors_path)
 modeler.load_model(config_data, state_dict)
 
-# Load dataset and create loader
-case_name = config_data.get("case_name", "pglib_opf_case14_ieee")
-dataset = OPFDataset(root="./opf_data", case_name=case_name)
+# Load dataset and create loader. virtual_node_transform is None for a plain
+# checkpoint and the per-sample graph augmentation for a virtual-node one,
+# which has to be applied before the loader collates.
+dataset = OPFDataset(
+    root="./opf_data",
+    case_name=case_name,
+    transform=modeler.virtual_node_transform,
+)
 loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
 # Run predictions
@@ -126,7 +133,7 @@ This package expects two files from the Hugging Face model repository:
 
 | File | Description |
 |---|---|
-| `config.json` | Model architecture configuration (metadata, input channels, hidden channels, etc.) |
+| `config.json` | Model architecture configuration (metadata, input channels, hidden channels, etc.), plus `minmax_scaling`, and for a virtual-node checkpoint the `virtual_node` block and `case_name` |
 | `model.safetensors` | Model weights in SafeTensors format |
 
 These are downloaded automatically via `huggingface_hub.hf_hub_download()`.
@@ -192,15 +199,112 @@ docker build \
 
 ## 📚 API Reference
 
-### 🎯 `Modeler(device, *, fail_on_missing=False, verbose=True)`
+### 🎯 `Modeler(device, *, fail_on_missing=False, verbose=True, demand_stats=None, case_name=None, virtual_node=True)`
 
 Main class for loading models and running predictions.
 
 **Methods:**
 - `load_model(config_data, state_dict)` — Construct model from config and load weights
-- `predict_batch(batch, minmax_scaling=True)` — Run forward pass on a single batch
-- `predict_single(data, minmax_scaling=True, validate=True)` — Run prediction on a single `HeteroData` sample (no DataLoader needed)
-- `run_predictions(loader, max_batches=None, minmax_scaling=True)` — Run predictions over a data loader
+- `predict_batch(batch, minmax_scaling=None)` — Run forward pass on a single batch
+- `predict_single(data, minmax_scaling=None, validate=True)` — Run prediction on a single `HeteroData` sample (no DataLoader needed)
+- `run_predictions(loader, max_batches=None, minmax_scaling=None)` — Run predictions over a data loader
+
+**Properties:**
+- `minmax_scaling` — the setting resolved from the config at load time
+- `virtual_node_transform` — the augmentation this checkpoint's graphs need, or `None`
+- `demand_stats_in_use` — the demand statistics actually applied to the virtual node, or `None`
+
+### ⚖️ Min-max scaling
+
+Min-max scaling maps the model's raw outputs onto each bus's voltage band and
+each generator's power limits with a sigmoid. Weights are trained either with
+it or without it, and applying the wrong setting does not fail — it silently
+squashes `vm`, `pg` and `qg` through bounds the weights never saw.
+
+Training records its own setting, so `minmax_scaling=None` (the default on
+every predict method) means **use what the checkpoint recorded**:
+
+| `config.json` | caller passes | result |
+|---|---|---|
+| nothing recorded | `None` | `True`, with a warning that it was assumed |
+| `minmax_scaling: false` | `None` | `False` |
+| `minmax_scaling: false` | `True` | `True`, with a mismatch warning |
+| anything | `True` / `False` | the caller's value |
+
+Pass an explicit value to override; the effective default remains `True`.
+
+### 🌐 Virtual-node checkpoints
+
+Some checkpoints are trained on an augmented graph: one global `grid` node
+wired to every other node type, plus reverse counterparts for the branch
+relations. `Modeler` reconstructs that augmentation from the checkpoint's own
+metadata and reads its demand statistics from the config, so serving one takes
+no extra arguments — unless the config carries statistics for more than one
+case, in which case name the case being served:
+
+```python
+# config.json names a single case, or carries a one-row table
+modeler = Modeler(device)
+
+# config.json carries several cases: say which one
+modeler = Modeler(device, case_name="pglib_opf_case14_ieee")
+
+modeler.load_model(config_data, state_dict)
+predictions = modeler.predict_single(load_from_json_file("case.json"))
+```
+
+A multi-case checkpoint loaded without a `case_name` raises on load, listing
+the cases it knows, rather than quietly applying the wrong network's scale.
+
+Batches are collated before prediction while the virtual node has to be added
+per sample, so for the dataset pipeline pass the transform to the dataset:
+
+```python
+dataset = OPFDataset(root, case_name, transform=modeler.virtual_node_transform)
+```
+
+#### Demand statistics
+
+A width-4 `grid` node standardises total demand against a mean and standard
+deviation. Those describe a pool of samples rather than any single graph, so
+they cannot be recovered from the input and `config.json` records them per case:
+
+```json
+"virtual_node": {
+  "enabled": true,
+  "variant": "allnode_demand",
+  "demand_stats": {
+    "pglib_opf_case14_ieee": [[p_mean, p_std], [q_mean, q_std]]
+  }
+}
+```
+
+Total demand scales with the network, so the row has to be chosen by name:
+
+| config.json | constructor | result |
+|---|---|---|
+| table + `case_name` | nothing | that case's row |
+| one-case table | nothing | the only row |
+| many-case table | nothing | raises, listing the cases |
+| many-case table | `case_name="…"` | that case's row |
+| anything | `demand_stats=((pm, ps), (qm, qs))` | used as-is, no lookup |
+| anything | `demand_stats={case: [[…], […]]}` | merged over the config's rows |
+| no table | nothing | raises — pass `demand_stats` |
+
+A checkpoint whose config carries no table raises on load rather than silently
+zeroing those channels, which would leave the virtual node without the demand
+signal the weights read. To supply or substitute your own, build a table with
+`compute_demand_stats(samples)` over a pool of samples for the case.
+`demand_stats_in_use` reports what was applied, and `virtual_node=False` skips
+detection entirely.
+
+### 🧮 Model configuration keys
+
+The whole `config["models"]["HGT"]` block reaches the model constructor, so
+architecture keys recorded at training time apply automatically — including
+`use_demand_sum_rule`, which ties each graph's total active generation to its
+demand plus estimated series losses instead of letting each generator pick a
+setpoint alone. It defaults to off.
 
 ### 📥 Ingestion Functions
 
@@ -212,6 +316,18 @@ Main class for loading models and running predictions.
 | `load_from_matpower(path)` | Load from a MATPOWER `.m` file (requires `pandapower`) |
 | `process_opf_dict(obj, require_solution=False)` | Core OPF dict → `HeteroData` converter |
 | `build_hetero_data(nodes, edges, graph_attrs=None)` | Build generic `HeteroData` from dicts |
+
+### 🌐 Virtual-node helpers
+
+| Function / Class | Description |
+|---|---|
+| `variant_from_metadata(metadata, demand_stats=None)` | Reconstruct a checkpoint's augmentation from its metadata, or `None` if it has none |
+| `make_variant(name, demand_stats=None)` | Build a named variant (`legacy`, `allnode_ones`, `allnode_demand`) |
+| `compute_demand_stats(samples)` | `((pd_mean, pd_std), (qd_mean, qd_std))` over a sample pool |
+| `select_demand_stats(table, case_name=None)` | Pick one case's row out of a per-case table |
+| `needs_demand_stats(metadata)` | Whether a checkpoint declares a demand-carrying virtual node |
+| `extend_metadata(metadata, variant)` | Add the variant's node and relations to a metadata dict |
+| `AddHeteroVirtualNode`, `AddReverseGridEdges` | The underlying PyG transforms |
 
 ### 🛡️ Validation
 
