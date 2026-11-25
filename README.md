@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/lumina-horizontal-dark.svg">
+    <img alt="LUMINA" src="docs/assets/brand/lumina-horizontal-light.svg" height="64">
+  </picture>
+</p>
+
 # ⚡ lumina-inference
 
 Lightweight inference package for **LUMINA** trained models. Load models from Hugging Face and run predictions.
